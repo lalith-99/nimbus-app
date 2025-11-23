@@ -30,8 +30,8 @@ func Load() (*Config, error) {
 		// Local postgres defaults
 		DBHost:     "localhost",
 		DBPort:     5432,
-		DBUser:     "postgres",
-		DBPassword: "postgres",
+		DBUser:     "lalithlochan",
+		DBPassword: "",
 		DBName:     "nimbus",
 		DBSSLMode:  "disable",
 	}

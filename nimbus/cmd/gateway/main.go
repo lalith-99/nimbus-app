@@ -15,6 +15,7 @@ import (
 
 	"github.com/lalithlochan/nimbus/internal/api"
 	"github.com/lalithlochan/nimbus/internal/config"
+	"github.com/lalithlochan/nimbus/internal/db"
 	"github.com/lalithlochan/nimbus/internal/observ"
 )
 
@@ -44,6 +45,32 @@ func run() error {
 		zap.Int("port", cfg.Port),
 	)
 
+	// Initialize database connection
+	ctx := context.Background()
+	dbConfig := db.Config{
+		Host:     cfg.DBHost,
+		Port:     cfg.DBPort,
+		User:     cfg.DBUser,
+		Password: cfg.DBPassword,
+		Database: cfg.DBName,
+		SSLMode:  cfg.DBSSLMode,
+	}
+
+	database, err := db.New(ctx, dbConfig, logger)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer database.Close()
+
+	logger.Info("database connection established",
+		zap.String("host", cfg.DBHost),
+		zap.Int("port", cfg.DBPort),
+		zap.String("database", cfg.DBName),
+	)
+
+	// Initialize repository
+	repo := db.NewRepository(database, logger)
+
 	// Setup router
 	r := chi.NewRouter()
 
@@ -72,9 +99,10 @@ func run() error {
 	})
 
 	// API routes
-	handler := api.NewHandler(logger)
+	handler := api.NewHandler(logger, repo)
 	r.Route("/v1", func(r chi.Router) {
 		r.Post("/notifications", handler.CreateNotification)
+		r.Get("/notifications/{id}", handler.GetNotification)
 	})
 
 	// Health check

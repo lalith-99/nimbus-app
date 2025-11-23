@@ -32,10 +32,18 @@ type Config struct {
 // - Manages connection lifecycle
 func New(ctx context.Context, cfg Config, logger *zap.Logger) (*DB, error) {
 	// Build connection string
-	dsn := fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode,
-	)
+	var dsn string
+	if cfg.Password != "" {
+		dsn = fmt.Sprintf(
+			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode,
+		)
+	} else {
+		dsn = fmt.Sprintf(
+			"host=%s port=%d user=%s dbname=%s sslmode=%s",
+			cfg.Host, cfg.Port, cfg.User, cfg.Database, cfg.SSLMode,
+		)
+	}
 
 	// Configure connection pool
 	poolConfig, err := pgxpool.ParseConfig(dsn)
