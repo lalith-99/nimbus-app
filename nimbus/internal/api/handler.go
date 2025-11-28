@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -10,6 +12,14 @@ import (
 
 	"github.com/lalithlochan/nimbus/internal/db"
 )
+
+// NotificationRepository defines the interface for notification database operations
+type NotificationRepository interface {
+	CreateNotification(ctx context.Context, notif *db.Notification) error
+	GetNotification(ctx context.Context, id uuid.UUID) (*db.Notification, error)
+	ListNotificationsByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.Notification, error)
+	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string) error
+}
 
 // NotificationRequest represents the incoming request body
 type NotificationRequest struct {
@@ -35,11 +45,11 @@ type ErrorResponse struct {
 // Handler holds dependencies for API handlers
 type Handler struct {
 	logger *zap.Logger
-	repo   *db.Repository
+	repo   NotificationRepository
 }
 
 // NewHandler creates a new API handler
-func NewHandler(logger *zap.Logger, repo *db.Repository) *Handler {
+func NewHandler(logger *zap.Logger, repo NotificationRepository) *Handler {
 	return &Handler{
 		logger: logger,
 		repo:   repo,
@@ -160,6 +170,138 @@ func (h *Handler) GetNotification(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(notif)
+}
+
+// ListNotifications handles GET /v1/notifications?tenant_id=xxx&limit=20&offset=0
+func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Parse query parameters
+	tenantIDStr := r.URL.Query().Get("tenant_id")
+	if tenantIDStr == "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Missing tenant_id", "tenant_id query parameter is required")
+		return
+	}
+
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid tenant_id", "tenant_id must be a valid UUID")
+		return
+	}
+
+	// Parse pagination parameters with defaults
+	limit := 20
+	offset := 0
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Fetch from database
+	notifications, err := h.repo.ListNotificationsByTenant(ctx, tenantID, limit, offset)
+	if err != nil {
+		h.logger.Error("failed to list notifications",
+			zap.Error(err),
+			zap.String("tenant_id", tenantIDStr),
+		)
+		h.writeError(w, http.StatusInternalServerError, "database_error", "Failed to list notifications", "")
+		return
+	}
+
+	h.logger.Info("notifications listed",
+		zap.String("tenant_id", tenantIDStr),
+		zap.Int("count", len(notifications)),
+		zap.Int("limit", limit),
+		zap.Int("offset", offset),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"data":   notifications,
+		"limit":  limit,
+		"offset": offset,
+		"count":  len(notifications),
+	})
+}
+
+// UpdateNotificationStatus handles PATCH /v1/notifications/{id}/status
+func (h *Handler) UpdateNotificationStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Extract ID from URL
+	idStr := chi.URLParam(r, "id")
+	notifID, err := uuid.Parse(idStr)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid notification ID", "ID must be a valid UUID")
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Status  string  `json:"status"`
+		Error   *string `json:"error,omitempty"`
+		Attempt int     `json:"attempt"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Malformed JSON body", err.Error())
+		return
+	}
+
+	// Validate status
+	validStatuses := map[string]bool{
+		db.StatusPending:    true,
+		db.StatusProcessing: true,
+		db.StatusSent:       true,
+		db.StatusFailed:     true,
+	}
+
+	if !validStatuses[req.Status] {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid status",
+			"status must be one of: pending, processing, sent, failed")
+		return
+	}
+
+	// Validate attempt is not negative
+	if req.Attempt < 0 {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid attempt",
+			"attempt must be >= 0")
+		return
+	}
+
+	// Update in database
+	err = h.repo.UpdateNotificationStatus(ctx, notifID, req.Status, req.Attempt, req.Error)
+	if err != nil {
+		h.logger.Error("failed to update notification status",
+			zap.Error(err),
+			zap.String("id", idStr),
+			zap.String("status", req.Status),
+		)
+		h.writeError(w, http.StatusInternalServerError, "database_error", "Failed to update notification", "")
+		return
+	}
+
+	h.logger.Info("notification status updated",
+		zap.String("id", idStr),
+		zap.String("status", req.Status),
+		zap.Int("attempt", req.Attempt),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":     idStr,
+		"status": req.Status,
+	})
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, status int, errType, title, detail string) {

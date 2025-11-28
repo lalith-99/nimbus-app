@@ -26,10 +26,6 @@ type Config struct {
 }
 
 // New creates a new database connection pool
-// Connection pooling is critical for performance:
-// - Reuses connections instead of creating new ones
-// - Handles concurrency automatically
-// - Manages connection lifecycle
 func New(ctx context.Context, cfg Config, logger *zap.Logger) (*DB, error) {
 	// Build connection string
 	var dsn string
@@ -90,7 +86,6 @@ func (db *DB) Close() {
 }
 
 // Pool returns the underlying connection pool
-// This is used by the repository layer
 func (db *DB) Pool() *pgxpool.Pool {
 	return db.pool
 }

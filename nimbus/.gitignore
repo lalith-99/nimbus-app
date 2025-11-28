@@ -6,6 +6,10 @@ bin/
 *.so
 *.dylib
 
+# Go build cache
+.cache/
+go-build/
+
 # Test coverage
 *.out
 coverage.html
