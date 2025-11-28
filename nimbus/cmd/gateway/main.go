@@ -102,7 +102,9 @@ func run() error {
 	handler := api.NewHandler(logger, repo)
 	r.Route("/v1", func(r chi.Router) {
 		r.Post("/notifications", handler.CreateNotification)
+		r.Get("/notifications", handler.ListNotifications)
 		r.Get("/notifications/{id}", handler.GetNotification)
+		r.Patch("/notifications/{id}/status", handler.UpdateNotificationStatus)
 	})
 
 	// Health check
