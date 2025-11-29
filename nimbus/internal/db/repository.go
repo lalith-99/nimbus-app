@@ -188,3 +188,46 @@ func (r *Repository) ListNotificationsByTenant(
 
 	return notifications, nil
 }
+
+func (r *Repository) GetPendingNotifications(ctx context.Context, limit int) ([]*Notification, error) {
+	query := `
+		SELECT 
+			id, tenant_id, user_id, channel, payload,
+			status, attempt, error_message, next_retry_at,
+			created_at, updated_at
+		FROM notifications
+		WHERE status = 'pending'
+		ORDER BY created_at ASC
+		LIMIT $1
+	`
+
+	rows, err := r.db.Pool().Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query pending notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var notifications []*Notification
+	for rows.Next() {
+		var notif Notification
+		err := rows.Scan(
+			&notif.ID,
+			&notif.TenantID,
+			&notif.UserID,
+			&notif.Channel,
+			&notif.Payload,
+			&notif.Status,
+			&notif.Attempt,
+			&notif.ErrorMessage,
+			&notif.NextRetryAt,
+			&notif.CreatedAt,
+			&notif.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan notification: %w", err)
+		}
+		notifications = append(notifications, &notif)
+	}
+
+	return notifications, nil
+}
