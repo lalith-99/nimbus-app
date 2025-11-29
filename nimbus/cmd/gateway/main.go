@@ -17,6 +17,7 @@ import (
 	"github.com/lalithlochan/nimbus/internal/config"
 	"github.com/lalithlochan/nimbus/internal/db"
 	"github.com/lalithlochan/nimbus/internal/observ"
+	"github.com/lalithlochan/nimbus/internal/worker"
 )
 
 func main() {
@@ -70,6 +71,19 @@ func run() error {
 
 	// Initialize repository
 	repo := db.NewRepository(database, logger)
+
+	// Create and start background worker
+	sender := worker.NewLogSender(logger)
+	w := worker.New(repo, sender, worker.Config{
+		PollInterval: 5 * time.Second,
+		BatchSize:    10,
+		MaxRetries:   5,
+	}, logger)
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+
+	go w.Start(workerCtx)
 
 	// Setup router
 	r := chi.NewRouter()
