@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -18,7 +19,7 @@ type NotificationRepository interface {
 	CreateNotification(ctx context.Context, notif *db.Notification) error
 	GetNotification(ctx context.Context, id uuid.UUID) (*db.Notification, error)
 	ListNotificationsByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.Notification, error)
-	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string) error
+	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
 }
 
 // NotificationRequest represents the incoming request body
@@ -279,7 +280,7 @@ func (h *Handler) UpdateNotificationStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Update in database
-	err = h.repo.UpdateNotificationStatus(ctx, notifID, req.Status, req.Attempt, req.Error)
+	err = h.repo.UpdateNotificationStatus(ctx, notifID, req.Status, req.Attempt, req.Error, nil)
 	if err != nil {
 		h.logger.Error("failed to update notification status",
 			zap.Error(err),

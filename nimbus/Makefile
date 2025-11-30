@@ -1,4 +1,18 @@
-.PHONY: help build run test clean deps
+.PHONY: help build run test clean deps test-cover test-quick lint dev
+
+test-cover: ## Run tests with coverage report
+	go test ./... -cover -coverprofile=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
+
+test-quick: ## Run tests (quick, no verbose)
+	go test ./...
+
+lint: ## Run linter
+	golangci-lint run
+
+dev: ## Build and run gateway
+	go run ./cmd/gateway/main.go
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'

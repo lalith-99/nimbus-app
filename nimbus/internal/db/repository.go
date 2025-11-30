@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -113,14 +114,15 @@ func (r *Repository) UpdateNotificationStatus(
 	status string,
 	attempt int,
 	errorMsg *string,
+	nextRetryAt *time.Time,
 ) error {
 	query := `
 		UPDATE notifications
-		SET status = $1, attempt = $2, error_message = $3
-		WHERE id = $4
+		SET status = $1, attempt = $2, error_message = $3, next_retry_at = $4
+		WHERE id = $5
 	`
 
-	result, err := r.db.Pool().Exec(ctx, query, status, attempt, errorMsg, id)
+	result, err := r.db.Pool().Exec(ctx, query, status, attempt, errorMsg, nextRetryAt, id)
 	if err != nil {
 		r.logger.Error("failed to update notification status",
 			zap.Error(err),
@@ -196,7 +198,7 @@ func (r *Repository) GetPendingNotifications(ctx context.Context, limit int) ([]
 			status, attempt, error_message, next_retry_at,
 			created_at, updated_at
 		FROM notifications
-		WHERE status = 'pending'
+		WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW())
 		ORDER BY created_at ASC
 		LIMIT $1
 	`
