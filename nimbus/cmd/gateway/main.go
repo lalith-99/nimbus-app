@@ -85,6 +85,8 @@ func run() error {
 
 	go w.Start(workerCtx)
 
+	logger.Info("background worker started")
+
 	// Setup router
 	r := chi.NewRouter()
 

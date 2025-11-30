@@ -12,7 +12,7 @@ import (
 
 type Repository interface {
 	GetPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error)
-	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string) error
+	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
 }
 
 type Sender interface {
@@ -87,7 +87,7 @@ func (w *Worker) processBatch(ctx context.Context) {
 
 func (w *Worker) processNotification(ctx context.Context, notif *db.Notification) {
 	// Mark as processing first to prevent duplicate picks
-	w.repo.UpdateNotificationStatus(ctx, notif.ID, "processing", notif.Attempt, nil)
+	w.repo.UpdateNotificationStatus(ctx, notif.ID, "processing", notif.Attempt, nil, notif.NextRetryAt)
 
 	err := w.sender.Send(ctx, notif)
 	newAttempt := notif.Attempt + 1
@@ -103,15 +103,31 @@ func (w *Worker) processNotification(ctx context.Context, notif *db.Notification
 
 		if newAttempt >= w.config.MaxRetries {
 			// Max retries reached, mark as failed
-			w.repo.UpdateNotificationStatus(ctx, notif.ID, "failed", newAttempt, &errMsg)
+			w.repo.UpdateNotificationStatus(ctx, notif.ID, "failed", newAttempt, &errMsg, nil)
 		} else {
-			// Retry later - set back to pending
-			w.repo.UpdateNotificationStatus(ctx, notif.ID, "pending", newAttempt, &errMsg)
+			nextRetry := w.calculateNextRetry(newAttempt)
+			w.repo.UpdateNotificationStatus(ctx, notif.ID, "pending", newAttempt, &errMsg, &nextRetry)
 		}
 	} else {
 		w.logger.Info("notification sent",
 			zap.String("id", notif.ID.String()),
 		)
-		w.repo.UpdateNotificationStatus(ctx, notif.ID, "sent", newAttempt, nil)
+		w.repo.UpdateNotificationStatus(ctx, notif.ID, "sent", newAttempt, nil, nil)
 	}
+}
+
+// Calculate next retry time based on attempt
+func (w *Worker) calculateNextRetry(attempt int) time.Time {
+	delays := []time.Duration{
+		1 * time.Minute,  // attempt 1 → wait 1 min
+		5 * time.Minute,  // attempt 2 → wait 5 min
+		15 * time.Minute, // attempt 3 → wait 15 min
+	}
+
+	idx := attempt - 1
+	if idx >= len(delays) {
+		idx = len(delays) - 1
+	}
+
+	return time.Now().Add(delays[idx])
 }

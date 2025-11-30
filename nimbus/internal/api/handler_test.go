@@ -85,7 +85,7 @@ func (m *MockRepository) ListNotificationsByTenant(ctx context.Context, tenantID
 	return result, nil
 }
 
-func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string) error {
+func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
 	m.updateCalled = true
 
 	if m.shouldFail {

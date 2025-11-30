@@ -35,7 +35,7 @@ func (m *MockRepository) GetPendingNotifications(ctx context.Context, limit int)
 	return m.notifications, nil
 }
 
-func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string) error {
+func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
 	if m.shouldFail {
 		return errors.New("database error")
 	}
