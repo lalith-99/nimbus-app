@@ -72,8 +72,16 @@ func run() error {
 	// Initialize repository
 	repo := db.NewRepository(database, logger)
 
-	// Create and start background worker
-	sender := worker.NewLogSender(logger)
+	// Create email sender with SMTP config
+	smtpConfig := worker.SMTPConfig{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		Username: cfg.SMTPUsername,
+		Password: cfg.SMTPPassword,
+		From:     cfg.SMTPFrom,
+	}
+	sender := worker.NewEmailSender(smtpConfig, logger)
+
 	w := worker.New(repo, sender, worker.Config{
 		PollInterval: 5 * time.Second,
 		BatchSize:    10,

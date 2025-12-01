@@ -18,6 +18,13 @@ type Config struct {
 	DBPassword string
 	DBName     string
 	DBSSLMode  string
+
+	// SMTP config for email sending
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string // sender email address
 }
 
 // Load reads configuration from environment variables with sensible defaults
@@ -34,6 +41,11 @@ func Load() (*Config, error) {
 		DBPassword: "",
 		DBName:     "nimbus",
 		DBSSLMode:  "disable",
+
+		// SMTP defaults
+		SMTPHost: "localhost",
+		SMTPPort: 587,
+		SMTPFrom: "noreply@nimbus.local",
 	}
 
 	if port := os.Getenv("PORT"); port != "" {
@@ -79,6 +91,30 @@ func Load() (*Config, error) {
 
 	if sslmode := os.Getenv("DB_SSLMODE"); sslmode != "" {
 		cfg.DBSSLMode = sslmode
+	}
+
+	if host := os.Getenv("SMTP_HOST"); host != "" {
+		cfg.SMTPHost = host
+	}
+
+	if port := os.Getenv("SMTP_PORT"); port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil {
+			return nil, fmt.Errorf("invalid SMTP_PORT: %w", err)
+		}
+		cfg.SMTPPort = p
+	}
+
+	if user := os.Getenv("SMTP_USERNAME"); user != "" {
+		cfg.SMTPUsername = user
+	}
+
+	if pass := os.Getenv("SMTP_PASSWORD"); pass != "" {
+		cfg.SMTPPassword = pass
+	}
+
+	if from := os.Getenv("SMTP_FROM"); from != "" {
+		cfg.SMTPFrom = from
 	}
 
 	return cfg, nil
