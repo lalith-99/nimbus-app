@@ -25,6 +25,9 @@ type Config struct {
 	SMTPUsername string
 	SMTPPassword string
 	SMTPFrom     string // sender email address
+
+	AWSRegion    string
+	SESFromEmail string
 }
 
 // Load reads configuration from environment variables with sensible defaults
@@ -46,6 +49,9 @@ func Load() (*Config, error) {
 		SMTPHost: "localhost",
 		SMTPPort: 587,
 		SMTPFrom: "noreply@nimbus.local",
+
+		AWSRegion:    "us-east-1",
+		SESFromEmail: "noreply@nimbus.local",
 	}
 
 	if port := os.Getenv("PORT"); port != "" {
@@ -115,6 +121,14 @@ func Load() (*Config, error) {
 
 	if from := os.Getenv("SMTP_FROM"); from != "" {
 		cfg.SMTPFrom = from
+	}
+
+	if region := os.Getenv("AWS_REGION"); region != "" {
+		cfg.AWSRegion = region
+	}
+
+	if from := os.Getenv("SES_FROM_EMAIL"); from != "" {
+		cfg.SESFromEmail = from
 	}
 
 	return cfg, nil
