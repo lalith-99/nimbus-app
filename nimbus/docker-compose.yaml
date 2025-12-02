@@ -15,11 +15,11 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-nimbus123}
       - DB_NAME=${DB_NAME:-nimbus}
       - DB_SSLMODE=disable
-      - SMTP_HOST=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USERNAME=${SMTP_USERNAME}
-      - SMTP_PASSWORD=${SMTP_PASSWORD}
-      - SMTP_FROM=${SMTP_FROM}
+      # AWS SES config
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - SES_FROM_EMAIL=${SES_FROM_EMAIL}
     depends_on:
       postgres:
         condition: service_healthy

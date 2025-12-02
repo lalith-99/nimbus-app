@@ -72,15 +72,15 @@ func run() error {
 	// Initialize repository
 	repo := db.NewRepository(database, logger)
 
-	// Create email sender with SMTP config
-	smtpConfig := worker.SMTPConfig{
-		Host:     cfg.SMTPHost,
-		Port:     cfg.SMTPPort,
-		Username: cfg.SMTPUsername,
-		Password: cfg.SMTPPassword,
-		From:     cfg.SMTPFrom,
+	sesCfg := worker.SESConfig{
+		Region:    cfg.AWSRegion,
+		FromEmail: cfg.SESFromEmail,
 	}
-	sender := worker.NewEmailSender(smtpConfig, logger)
+
+	sender, err := worker.NewSESSender(ctx, sesCfg, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create SES email sender: %w", err)
+	}
 
 	w := worker.New(repo, sender, worker.Config{
 		PollInterval: 5 * time.Second,

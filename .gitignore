@@ -1,0 +1,12 @@
+# Go build cache (when GOCACHE points to workspace)
+.cache/
+go-build/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
