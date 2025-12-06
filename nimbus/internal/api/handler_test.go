@@ -105,6 +105,35 @@ func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.U
 	return nil
 }
 
+// DLQ mock methods for interface compliance
+func (m *MockRepository) ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.DeadLetterNotification, error) {
+	if m.shouldFail {
+		return nil, ErrDatabaseError
+	}
+	return []*db.DeadLetterNotification{}, nil
+}
+
+func (m *MockRepository) GetDeadLetter(ctx context.Context, id uuid.UUID) (*db.DeadLetterNotification, error) {
+	if m.shouldFail {
+		return nil, ErrDatabaseError
+	}
+	return nil, errors.New("not found")
+}
+
+func (m *MockRepository) RetryDeadLetter(ctx context.Context, id uuid.UUID) (*db.Notification, error) {
+	if m.shouldFail {
+		return nil, ErrDatabaseError
+	}
+	return &db.Notification{ID: uuid.New()}, nil
+}
+
+func (m *MockRepository) DiscardDeadLetter(ctx context.Context, id uuid.UUID) error {
+	if m.shouldFail {
+		return ErrDatabaseError
+	}
+	return nil
+}
+
 func TestCreateNotification(t *testing.T) {
 	tests := []struct {
 		name           string

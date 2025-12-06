@@ -43,6 +43,18 @@ func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.U
 	return nil
 }
 
+func (m *MockRepository) MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error) {
+	if m.shouldFail {
+		return nil, errors.New("database error")
+	}
+	m.updateCalls = append(m.updateCalls, updateCall{notif.ID, db.StatusDeadLettered, notif.Attempt + 1, &lastError})
+	return &db.DeadLetterNotification{
+		ID:                     uuid.New(),
+		OriginalNotificationID: notif.ID,
+		Status:                 db.DLQStatusPending,
+	}, nil
+}
+
 type MockSender struct {
 	shouldFail bool
 	sendCalls  int
@@ -139,9 +151,9 @@ func TestWorker_ProcessNotification_FailMaxRetries(t *testing.T) {
 
 	w.processNotification(context.Background(), notif)
 
-	// Second call should be "failed" (max retries reached)
-	if repo.updateCalls[1].status != "failed" {
-		t.Errorf("expected status 'failed' after max retries, got '%s'", repo.updateCalls[1].status)
+	// Second call should be "dead_lettered" (moved to DLQ after max retries)
+	if repo.updateCalls[1].status != db.StatusDeadLettered {
+		t.Errorf("expected status '%s' after max retries, got '%s'", db.StatusDeadLettered, repo.updateCalls[1].status)
 	}
 	if repo.updateCalls[1].attempt != 3 {
 		t.Errorf("expected attempt 3, got %d", repo.updateCalls[1].attempt)
