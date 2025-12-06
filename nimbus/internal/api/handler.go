@@ -20,6 +20,11 @@ type NotificationRepository interface {
 	GetNotification(ctx context.Context, id uuid.UUID) (*db.Notification, error)
 	ListNotificationsByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.Notification, error)
 	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
+	// DLQ methods
+	ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.DeadLetterNotification, error)
+	GetDeadLetter(ctx context.Context, id uuid.UUID) (*db.DeadLetterNotification, error)
+	RetryDeadLetter(ctx context.Context, id uuid.UUID) (*db.Notification, error)
+	DiscardDeadLetter(ctx context.Context, id uuid.UUID) error
 }
 
 // NotificationRequest represents the incoming request body
@@ -302,6 +307,160 @@ func (h *Handler) UpdateNotificationStatus(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]string{
 		"id":     idStr,
 		"status": req.Status,
+	})
+}
+
+// ListDeadLetterQueue handles GET /v1/dlq?tenant_id=xxx&limit=20&offset=0
+func (h *Handler) ListDeadLetterQueue(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Parse query parameters
+	tenantIDStr := r.URL.Query().Get("tenant_id")
+	if tenantIDStr == "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Missing tenant_id", "tenant_id query parameter is required")
+		return
+	}
+
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid tenant_id", "tenant_id must be a valid UUID")
+		return
+	}
+
+	// Parse pagination parameters with defaults
+	limit := 20
+	offset := 0
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Fetch from database
+	dlqItems, err := h.repo.ListDeadLetterByTenant(ctx, tenantID, limit, offset)
+	if err != nil {
+		h.logger.Error("failed to list dead letter queue",
+			zap.Error(err),
+			zap.String("tenant_id", tenantIDStr),
+		)
+		h.writeError(w, http.StatusInternalServerError, "database_error", "Failed to list dead letter queue", "")
+		return
+	}
+
+	h.logger.Info("dead letter queue listed",
+		zap.String("tenant_id", tenantIDStr),
+		zap.Int("count", len(dlqItems)),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"data":   dlqItems,
+		"limit":  limit,
+		"offset": offset,
+		"count":  len(dlqItems),
+	})
+}
+
+// GetDeadLetterItem handles GET /v1/dlq/{id}
+func (h *Handler) GetDeadLetterItem(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	idStr := chi.URLParam(r, "id")
+	dlqID, err := uuid.Parse(idStr)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid DLQ ID", "ID must be a valid UUID")
+		return
+	}
+
+	dlqItem, err := h.repo.GetDeadLetter(ctx, dlqID)
+	if err != nil {
+		h.logger.Error("failed to get dead letter item",
+			zap.Error(err),
+			zap.String("id", idStr),
+		)
+		h.writeError(w, http.StatusNotFound, "not_found", "Dead letter item not found", "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(dlqItem)
+}
+
+// RetryDeadLetterItem handles POST /v1/dlq/{id}/retry
+func (h *Handler) RetryDeadLetterItem(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	idStr := chi.URLParam(r, "id")
+	dlqID, err := uuid.Parse(idStr)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid DLQ ID", "ID must be a valid UUID")
+		return
+	}
+
+	// Retry creates a new notification from the DLQ item
+	newNotif, err := h.repo.RetryDeadLetter(ctx, dlqID)
+	if err != nil {
+		h.logger.Error("failed to retry dead letter item",
+			zap.Error(err),
+			zap.String("id", idStr),
+		)
+		h.writeError(w, http.StatusInternalServerError, "database_error", "Failed to retry dead letter item", "")
+		return
+	}
+
+	h.logger.Info("dead letter item retried",
+		zap.String("dlq_id", idStr),
+		zap.String("new_notification_id", newNotif.ID.String()),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":                  idStr,
+		"status":              "retried",
+		"new_notification_id": newNotif.ID.String(),
+	})
+}
+
+// DiscardDeadLetterItem handles POST /v1/dlq/{id}/discard
+func (h *Handler) DiscardDeadLetterItem(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	idStr := chi.URLParam(r, "id")
+	dlqID, err := uuid.Parse(idStr)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid DLQ ID", "ID must be a valid UUID")
+		return
+	}
+
+	err = h.repo.DiscardDeadLetter(ctx, dlqID)
+	if err != nil {
+		h.logger.Error("failed to discard dead letter item",
+			zap.Error(err),
+			zap.String("id", idStr),
+		)
+		h.writeError(w, http.StatusInternalServerError, "database_error", "Failed to discard dead letter item", "")
+		return
+	}
+
+	h.logger.Info("dead letter item discarded",
+		zap.String("id", idStr),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":     idStr,
+		"status": "discarded",
 	})
 }
 

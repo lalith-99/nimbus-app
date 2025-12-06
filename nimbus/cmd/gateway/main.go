@@ -129,6 +129,12 @@ func run() error {
 		r.Get("/notifications", handler.ListNotifications)
 		r.Get("/notifications/{id}", handler.GetNotification)
 		r.Patch("/notifications/{id}/status", handler.UpdateNotificationStatus)
+
+		// Dead Letter Queue routes
+		r.Get("/dlq", handler.ListDeadLetterQueue)
+		r.Get("/dlq/{id}", handler.GetDeadLetterItem)
+		r.Post("/dlq/{id}/retry", handler.RetryDeadLetterItem)
+		r.Post("/dlq/{id}/discard", handler.DiscardDeadLetterItem)
 	})
 
 	// Health check

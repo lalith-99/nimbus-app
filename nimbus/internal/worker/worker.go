@@ -13,6 +13,7 @@ import (
 type Repository interface {
 	GetPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error)
 	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
+	MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error)
 }
 
 type Sender interface {
@@ -102,8 +103,19 @@ func (w *Worker) processNotification(ctx context.Context, notif *db.Notification
 		errMsg := err.Error()
 
 		if newAttempt >= w.config.MaxRetries {
-			// Max retries reached, mark as failed
-			w.repo.UpdateNotificationStatus(ctx, notif.ID, "failed", newAttempt, &errMsg, nil)
+			// Max retries reached, move to dead letter queue
+			_, dlqErr := w.repo.MoveToDeadLetter(ctx, notif, errMsg)
+			if dlqErr != nil {
+				w.logger.Error("failed to move notification to dead letter queue",
+					zap.String("id", notif.ID.String()),
+					zap.Error(dlqErr),
+				)
+			} else {
+				w.logger.Info("notification moved to dead letter queue",
+					zap.String("id", notif.ID.String()),
+					zap.Int("attempts", newAttempt),
+				)
+			}
 		} else {
 			nextRetry := w.calculateNextRetry(newAttempt)
 			w.repo.UpdateNotificationStatus(ctx, notif.ID, "pending", newAttempt, &errMsg, &nextRetry)
@@ -121,7 +133,7 @@ func (w *Worker) calculateNextRetry(attempt int) time.Time {
 	delays := []time.Duration{
 		1 * time.Minute,  // attempt 1 → wait 1 min
 		5 * time.Minute,  // attempt 2 → wait 5 min
-		15 * time.Minute, // attempt 3 → wait 15 min
+		15 * time.Minute, // attempt 3 → w–––
 	}
 
 	idx := attempt - 1

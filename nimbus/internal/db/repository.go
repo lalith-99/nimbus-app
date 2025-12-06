@@ -233,3 +233,248 @@ func (r *Repository) GetPendingNotifications(ctx context.Context, limit int) ([]
 
 	return notifications, nil
 }
+
+// MoveToDeadLetter moves a failed notification to the dead letter queue
+func (r *Repository) MoveToDeadLetter(ctx context.Context, notif *Notification, lastError string) (*DeadLetterNotification, error) {
+	// Start a transaction
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Insert into dead letter queue
+	dlq := &DeadLetterNotification{
+		ID:                     uuid.New(),
+		OriginalNotificationID: notif.ID,
+		TenantID:               notif.TenantID,
+		UserID:                 notif.UserID,
+		Channel:                notif.Channel,
+		Payload:                notif.Payload,
+		Attempts:               notif.Attempt,
+		LastError:              lastError,
+		Status:                 DLQStatusPending,
+	}
+
+	insertQuery := `
+		INSERT INTO dead_letter_notifications (
+			id, original_notification_id, tenant_id, user_id, channel,
+			payload, attempts, last_error, status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING created_at, updated_at
+	`
+
+	err = tx.QueryRow(ctx, insertQuery,
+		dlq.ID,
+		dlq.OriginalNotificationID,
+		dlq.TenantID,
+		dlq.UserID,
+		dlq.Channel,
+		dlq.Payload,
+		dlq.Attempts,
+		dlq.LastError,
+		dlq.Status,
+	).Scan(&dlq.CreatedAt, &dlq.UpdatedAt)
+
+	if err != nil {
+		return nil, fmt.Errorf("insert dead letter: %w", err)
+	}
+
+	// Update original notification status
+	updateQuery := `UPDATE notifications SET status = $1 WHERE id = $2`
+	_, err = tx.Exec(ctx, updateQuery, StatusDeadLettered, notif.ID)
+	if err != nil {
+		return nil, fmt.Errorf("update notification status: %w", err)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	r.logger.Info("notification moved to dead letter queue",
+		zap.String("notification_id", notif.ID.String()),
+		zap.String("dlq_id", dlq.ID.String()),
+		zap.String("last_error", lastError),
+	)
+
+	return dlq, nil
+}
+
+// ListDeadLetterByTenant retrieves DLQ items for a tenant
+func (r *Repository) ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*DeadLetterNotification, error) {
+	query := `
+		SELECT 
+			id, original_notification_id, tenant_id, user_id, channel,
+			payload, attempts, last_error, status, retried_notification_id,
+			created_at, updated_at
+		FROM dead_letter_notifications
+		WHERE tenant_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	rows, err := r.db.Pool().Query(ctx, query, tenantID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query dead letter notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*DeadLetterNotification
+	for rows.Next() {
+		var dlq DeadLetterNotification
+		err := rows.Scan(
+			&dlq.ID,
+			&dlq.OriginalNotificationID,
+			&dlq.TenantID,
+			&dlq.UserID,
+			&dlq.Channel,
+			&dlq.Payload,
+			&dlq.Attempts,
+			&dlq.LastError,
+			&dlq.Status,
+			&dlq.RetriedNotificationID,
+			&dlq.CreatedAt,
+			&dlq.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan dead letter: %w", err)
+		}
+		items = append(items, &dlq)
+	}
+
+	return items, nil
+}
+
+// GetDeadLetter retrieves a single DLQ item by ID
+func (r *Repository) GetDeadLetter(ctx context.Context, id uuid.UUID) (*DeadLetterNotification, error) {
+	query := `
+		SELECT 
+			id, original_notification_id, tenant_id, user_id, channel,
+			payload, attempts, last_error, status, retried_notification_id,
+			created_at, updated_at
+		FROM dead_letter_notifications
+		WHERE id = $1
+	`
+
+	var dlq DeadLetterNotification
+	err := r.db.Pool().QueryRow(ctx, query, id).Scan(
+		&dlq.ID,
+		&dlq.OriginalNotificationID,
+		&dlq.TenantID,
+		&dlq.UserID,
+		&dlq.Channel,
+		&dlq.Payload,
+		&dlq.Attempts,
+		&dlq.LastError,
+		&dlq.Status,
+		&dlq.RetriedNotificationID,
+		&dlq.CreatedAt,
+		&dlq.UpdatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, fmt.Errorf("dead letter not found: %s", id)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("query dead letter: %w", err)
+	}
+
+	return &dlq, nil
+}
+
+// RetryDeadLetter creates a new notification from a DLQ item and marks it as retried
+func (r *Repository) RetryDeadLetter(ctx context.Context, dlqID uuid.UUID) (*Notification, error) {
+	// Get the DLQ item
+	dlq, err := r.GetDeadLetter(ctx, dlqID)
+	if err != nil {
+		return nil, err
+	}
+
+	if dlq.Status != DLQStatusPending {
+		return nil, fmt.Errorf("dead letter already processed: %s", dlq.Status)
+	}
+
+	// Start transaction
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Create new notification
+	newNotif := &Notification{
+		ID:       uuid.New(),
+		TenantID: dlq.TenantID,
+		UserID:   dlq.UserID,
+		Channel:  dlq.Channel,
+		Payload:  dlq.Payload,
+		Status:   StatusPending,
+		Attempt:  0,
+	}
+
+	insertQuery := `
+		INSERT INTO notifications (
+			id, tenant_id, user_id, channel, payload, status, attempt
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING created_at, updated_at
+	`
+
+	err = tx.QueryRow(ctx, insertQuery,
+		newNotif.ID,
+		newNotif.TenantID,
+		newNotif.UserID,
+		newNotif.Channel,
+		newNotif.Payload,
+		newNotif.Status,
+		newNotif.Attempt,
+	).Scan(&newNotif.CreatedAt, &newNotif.UpdatedAt)
+
+	if err != nil {
+		return nil, fmt.Errorf("insert retry notification: %w", err)
+	}
+
+	// Update DLQ item
+	updateQuery := `
+		UPDATE dead_letter_notifications 
+		SET status = $1, retried_notification_id = $2
+		WHERE id = $3
+	`
+	_, err = tx.Exec(ctx, updateQuery, DLQStatusRetried, newNotif.ID, dlqID)
+	if err != nil {
+		return nil, fmt.Errorf("update dead letter: %w", err)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	r.logger.Info("dead letter retried",
+		zap.String("dlq_id", dlqID.String()),
+		zap.String("new_notification_id", newNotif.ID.String()),
+	)
+
+	return newNotif, nil
+}
+
+// DiscardDeadLetter marks a DLQ item as discarded (won't be retried)
+func (r *Repository) DiscardDeadLetter(ctx context.Context, dlqID uuid.UUID) error {
+	query := `
+		UPDATE dead_letter_notifications 
+		SET status = $1
+		WHERE id = $2 AND status = $3
+	`
+
+	result, err := r.db.Pool().Exec(ctx, query, DLQStatusDiscarded, dlqID, DLQStatusPending)
+	if err != nil {
+		return fmt.Errorf("discard dead letter: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("dead letter not found or already processed")
+	}
+
+	r.logger.Info("dead letter discarded", zap.String("dlq_id", dlqID.String()))
+
+	return nil
+}
