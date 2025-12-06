@@ -4,36 +4,36 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              NIMBUS GATEWAY                                  │
-│                            (Single Process)                                  │
-│                                                                              │
+│                              NIMBUS GATEWAY                                 │
+│                            (Single Process)                                 │
+│                                                                             │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                          HTTP Server (Chi)                              │ │
-│  │                            Port 8080                                    │ │
-│  │                                                                         │ │
+│  │                          HTTP Server (Chi)                             │ │
+│  │                            Port 8080                                   │ │
+│  │                                                                        │ │
 │  │   Middleware: RequestID, RealIP, Recoverer, Timeout(30s), Logging      │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
-│                                     │                                        │
-│                                     ▼                                        │
+│                                     │                                       │
+│                                     ▼                                       │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                           API Handlers                                  │ │
-│  │                                                                         │ │
-│  │   Notifications:                           Dead Letter Queue:           │ │
-│  │   ├─ POST /v1/notifications                ├─ GET  /v1/dlq              │ │
-│  │   ├─ GET  /v1/notifications                ├─ GET  /v1/dlq/{id}         │ │
-│  │   ├─ GET  /v1/notifications/{id}           ├─ POST /v1/dlq/{id}/retry   │ │
-│  │   └─ PATCH /v1/notifications/{id}/status   └─ POST /v1/dlq/{id}/discard │ │
+│  │                           API Handlers                                 │ │
+│  │                                                                        │ │
+│  │   Notifications:                           Dead Letter Queue:          │
+│  │   ├─ POST /v1/notifications                ├─ GET  /v1/dlq             │ │
+│  │   ├─ GET  /v1/notifications                ├─ GET  /v1/dlq/{id}        │ │
+│  │   ├─ GET  /v1/notifications/{id}           ├─ POST /v1/dlq/{id}/retry  │ │
+│  │   └─ PATCH /v1/notifications/{id}/status   └─ POST /v1/dlq/{id}/discard│ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
-│                                     │                                        │
-│                                     ▼                                        │
+│                                     │                                       │
+│                                     ▼                                       │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                        Repository Layer                                 │ │
-│  │                   (Interface-based abstraction)                         │ │
+│  │                        Repository Layer                                │ │
+│  │                   (Interface-based abstraction)                        │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
-│                                     │                                        │
-│          ┌──────────────────────────┴──────────────────────────┐            │
-│          │                                                      │            │
-│          ▼                                                      ▼            │
+│                                     │                                       │
+│          ┌──────────────────────────┴──────────────────────────-┐           │
+│          │                                                      │           │
+│          ▼                                                      ▼           │
 │   ┌─────────────────┐                                  ┌─────────────────┐  │
 │   │  notifications  │                                  │  dead_letter_   │  │
 │   │     table       │                                  │  notifications  │  │
@@ -47,45 +47,45 @@
 │   │ - attempt       │                                  │    retried/     │  │
 │   │ - next_retry_at │                                  │    discarded)   │  │
 │   └─────────────────┘                                  └─────────────────┘  │
-│                                                                              │
-└──────────────────────────────────────┬───────────────────────────────────────┘
+│                                                                             │
+└──────────────────────────────────────┬──────────────────────────────────────┘
                                        │
                                        │ Same Process (goroutine)
                                        │
 ┌──────────────────────────────────────▼───────────────────────────────────────┐
-│                            BACKGROUND WORKER                                  │
-│                                                                               │
+│                            BACKGROUND WORKER                                 │
+│                                                                              │
 │   ┌─────────────────────────────────────────────────────────────────────┐    │
-│   │                         Poll Loop (5s interval)                      │    │
-│   │                                                                      │    │
-│   │   for {                                                              │    │
-│   │       notifications := repo.GetPendingNotifications(limit: 10)       │    │
-│   │       for _, n := range notifications {                              │    │
-│   │           processNotification(n)                                     │    │
-│   │       }                                                              │    │
-│   │       time.Sleep(5 * time.Second)                                    │    │
-│   │   }                                                                  │    │
+│   │                         Poll Loop (5s interval)                     │    │
+│   │                                                                     │    │
+│   │   for {                                                             │    │
+│   │       notifications := repo.GetPendingNotifications(limit: 10)      │    │
+│   │       for _, n := range notifications {                             │    │
+│   │           processNotification(n)                                    │    │
+│   │       }                                                             │    │
+│   │       time.Sleep(5 * time.Second)                                   │    │
+│   │   }                                                                 │    │
 │   └─────────────────────────────────────────────────────────────────────┘    │
-│                                      │                                        │
-│                                      ▼                                        │
+│                                      │                                       │
+│                                      ▼                                       │
 │   ┌─────────────────────────────────────────────────────────────────────┐    │
-│   │                    processNotification(notif)                        │    │
-│   │                                                                      │    │
-│   │   1. Mark as "processing"                                            │    │
-│   │   2. sender.Send(notif)                                              │    │
-│   │   3. If success → status = "sent"                                    │    │
-│   │      If failure:                                                     │    │
-│   │        - attempt < maxRetries → status = "pending" + backoff         │    │
-│   │        - attempt >= maxRetries → MoveToDeadLetter()                  │    │
+│   │                    processNotification(notif)                       │    │
+│   │                                                                     │    │
+│   │   1. Mark as "processing"                                           │    │
+│   │   2. sender.Send(notif)                                             │    │
+│   │   3. If success → status = "sent"                                   │    │
+│   │      If failure:                                                    │    │
+│   │        - attempt < maxRetries → status = "pending" + backoff        │    │
+│   │        - attempt >= maxRetries → MoveToDeadLetter()                 │    │
 │   └─────────────────────────────────────────────────────────────────────┘    │
-│                                      │                                        │
-│                                      ▼                                        │
+│                                      │                                       │
+│                                      ▼                                       │
 │   ┌─────────────────────────────────────────────────────────────────────┐    │
-│   │                          SES Sender                                  │    │
-│   │                        (AWS SDK v2)                                  │    │
+│   │                          SES Sender                                 │    │
+│   │                        (AWS SDK v2)                                 │    │
 │   └─────────────────────────────────────────────────────────────────────┘    │
-│                                      │                                        │
-└──────────────────────────────────────┼────────────────────────────────────────┘
+│                                      │                                       │
+└──────────────────────────────────────┼───────────────────────────────────────┘
                                        │
                                        ▼
                             ┌─────────────────────┐
@@ -95,16 +95,16 @@
 
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                               EXTERNAL                                       │
-│                                                                              │
+│                               EXTERNAL                                      │
+│                                                                             │
 │   ┌───────────────────────────────────────────────────────────────────┐     │
-│   │                         PostgreSQL 15                              │     │
-│   │                                                                    │     │
-│   │   Database: nimbus                                                 │     │
-│   │   Tables: notifications, dead_letter_notifications                 │     │
-│   │   Connection: pgxpool (10 min, 4 max connections)                  │     │
+│   │                         PostgreSQL 15                             │     │
+│   │                                                                   │     │
+│   │   Database: nimbus                                                │     │
+│   │   Tables: notifications, dead_letter_notifications                │     │
+│   │   Connection: pgxpool (10 min, 4 max connections)                 │     │
 │   └───────────────────────────────────────────────────────────────────┘     │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -115,7 +115,7 @@
 ```
                     API Request                          Background Worker
                          │                                      │
-    ┌────────────────────▼────────────────────┐                │
+    ┌────────────────────▼────────────────────┐                 │
     │          POST /v1/notifications          │                │
     │                                          │                │
     │  {                                       │                │
@@ -124,7 +124,7 @@
     │    "channel": "email",                   │                │
     │    "payload": {"to": "...", ...}         │                │
     │  }                                       │                │
-    └────────────────────┬────────────────────┘                │
+    └────────────────────┬────────────────────┘                 │
                          │                                      │
                          ▼                                      │
                   ┌─────────────┐                               │
@@ -135,7 +135,7 @@
                   └──────┬──────┘                               │
                          │                                      │
                          ▼                                      │
-    ┌────────────────────────────────────────┐                 │
+    ┌────────────────────────────────────────┐                  │
     │              PostgreSQL                 │◀────────────────┤
     │                                         │    Poll every   │
     │  INSERT INTO notifications              │     5 seconds   │
@@ -297,8 +297,8 @@
 
 
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                              SUPPORTING SERVICES                                                     │
-│                                                                                                                      │
+│                                              SUPPORTING SERVICES                                                    │
+│                                                                                                                     │
 │   ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐                    │
 │   │   ElastiCache   │      │   S3            │      │   Secrets       │      │   Parameter     │                    │
 │   │   (Redis)       │      │                 │      │   Manager       │      │   Store         │                    │
@@ -307,13 +307,13 @@
 │   │   - dedup cache │      │     sms.txt     │      │   - API keys    │      │     flags       │                    │
 │   │   - sessions    │      │   - attachments │      │   - Twilio SID  │      │   - config      │                    │
 │   └─────────────────┘      └─────────────────┘      └─────────────────┘      └─────────────────┘                    │
-│                                                                                                                      │
+│                                                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                              OBSERVABILITY                                                           │
-│                                                                                                                      │
+│                                              OBSERVABILITY                                                          │
+│                                                                                                                     │
 │   ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐                    │
 │   │   CloudWatch    │      │   X-Ray         │      │   Prometheus    │      │   Grafana       │                    │
 │   │                 │      │                 │      │                 │      │                 │                    │
@@ -321,16 +321,16 @@
 │   │   - Metrics     │      │   - Service map │      │   - Queue depth │      │   - Alerts      │                    │
 │   │   - Alarms      │      │   - Latency     │      │   - Error rate  │      │   - SLOs        │                    │
 │   └─────────────────┘      └─────────────────┘      └─────────────────┘      └─────────────────┘                    │
-│                                                            │                                                         │
-│                                                            ▼                                                         │
-│                                                   ┌─────────────────┐                                                │
-│                                                   │   PagerDuty     │                                                │
-│                                                   │                 │                                                │
-│                                                   │   - DLQ alerts  │                                                │
-│                                                   │   - Error spike │                                                │
-│                                                   │   - SLA breach  │                                                │
-│                                                   └─────────────────┘                                                │
-│                                                                                                                      │
+│                                                            │                                                        │
+│                                                            ▼                                                        │
+│                                                   ┌─────────────────┐                                               │
+│                                                   │   PagerDuty     │                                               │
+│                                                   │                 │                                               │
+│                                                   │   - DLQ alerts  │                                               │
+│                                                   │   - Error spike │                                               │
+│                                                   │   - SLA breach  │                                               │
+│                                                   └─────────────────┘                                               │
+│                                                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
