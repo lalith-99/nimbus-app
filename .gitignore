@@ -1,12 +1,45 @@
-# Go build cache (when GOCACHE points to workspace)
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build cache
 .cache/
 go-build/
 
-# IDEs
+# Test coverage
+*.out
+coverage.html
+
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
+
+# Env files with secrets
+.env.local
+.env.*.local
 
 # OS
 .DS_Store
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# docs
+docs/
+.env
+
+# Other projects (not part of nimbus)
+echostream/
+llm-learning/
+my-filestream/
+TODO
