@@ -17,6 +17,8 @@ import (
 	"github.com/lalithlochan/nimbus/internal/config"
 	"github.com/lalithlochan/nimbus/internal/db"
 	"github.com/lalithlochan/nimbus/internal/observ"
+	"github.com/lalithlochan/nimbus/internal/redis"
+	"github.com/lalithlochan/nimbus/internal/sqs"
 	"github.com/lalithlochan/nimbus/internal/worker"
 )
 
@@ -72,6 +74,50 @@ func run() error {
 	// Initialize repository
 	repo := db.NewRepository(database, logger)
 
+	// Initialize Redis for idempotency and rate limiting
+	redisConfig := redis.Config{
+		Host:     cfg.RedisHost,
+		Port:     cfg.RedisPort,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	}
+
+	redisClient, err := redis.New(ctx, redisConfig, logger)
+	if err != nil {
+		logger.Warn("redis unavailable, idempotency disabled",
+			zap.Error(err),
+			zap.String("host", cfg.RedisHost),
+		)
+	}
+
+	var idempotencyService *redis.IdempotencyService
+	var rateLimiter *redis.RateLimiter
+	if redisClient != nil {
+		idempotencyService = redis.NewIdempotencyService(redisClient, logger)
+		rateLimiter = redis.NewRateLimiter(redisClient, logger, redis.RateLimitConfig{
+			Limit:  100,             // 100 requests
+			Window: 1 * time.Minute, // per minute per tenant
+		})
+		defer redisClient.Close()
+	}
+
+	// Initialize SQS producer
+	var producer *sqs.Producer
+	if cfg.SQSQueueURL != "" {
+		sqsCfg := sqs.Config{
+			Region:   cfg.SQSRegion,
+			QueueURL: cfg.SQSQueueURL,
+			DLQURL:   cfg.SQSDLQURL,
+		}
+		producer, err = sqs.NewProducer(ctx, sqsCfg, logger)
+		if err != nil {
+			logger.Warn("sqs producer unavailable, events will not be enqueued",
+				zap.Error(err),
+			)
+		}
+		defer producer.Close()
+	}
+
 	sesCfg := worker.SESConfig{
 		Region:    cfg.AWSRegion,
 		FromEmail: cfg.SESFromEmail,
@@ -123,8 +169,18 @@ func run() error {
 	})
 
 	// API routes
-	handler := api.NewHandler(logger, repo)
+	var handler *api.Handler
+	if idempotencyService != nil && producer != nil {
+		handler = api.NewHandlerWithSQS(logger, repo, idempotencyService, producer)
+	} else if idempotencyService != nil {
+		handler = api.NewHandlerWithIdempotency(logger, repo, idempotencyService)
+	} else {
+		handler = api.NewHandler(logger, repo)
+	}
 	r.Route("/v1", func(r chi.Router) {
+		// Apply rate limiting to API routes
+		r.Use(api.RateLimitMiddleware(rateLimiter, logger, api.TenantKeyFunc))
+
 		r.Post("/notifications", handler.CreateNotification)
 		r.Get("/notifications", handler.ListNotifications)
 		r.Get("/notifications/{id}", handler.GetNotification)

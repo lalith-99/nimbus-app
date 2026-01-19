@@ -13,6 +13,9 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-nimbus123}
       - DB_NAME=${DB_NAME:-nimbus}
       - DB_SSLMODE=disable
+      # Redis config
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       # AWS SES config
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
@@ -20,6 +23,8 @@ services:
       - SES_FROM_EMAIL=${SES_FROM_EMAIL}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   postgres:
@@ -39,5 +44,19 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_data:
+  redis_data:

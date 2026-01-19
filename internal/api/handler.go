@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lalithlochan/nimbus/internal/db"
+	"github.com/lalithlochan/nimbus/internal/redis"
+	"github.com/lalithlochan/nimbus/internal/sqs"
 )
 
 // NotificationRepository defines the interface for notification database operations
@@ -50,21 +53,50 @@ type ErrorResponse struct {
 
 // Handler holds dependencies for API handlers
 type Handler struct {
-	logger *zap.Logger
-	repo   NotificationRepository
+	logger      *zap.Logger
+	repo        NotificationRepository
+	idempotency *redis.IdempotencyService // nil if Redis not configured
+	producer    *sqs.Producer              // nil if SQS not configured
 }
 
 // NewHandler creates a new API handler
 func NewHandler(logger *zap.Logger, repo NotificationRepository) *Handler {
 	return &Handler{
-		logger: logger,
-		repo:   repo,
+		logger:      logger,
+		repo:        repo,
+		idempotency: nil, // Idempotency disabled by default
+		producer:    nil, // SQS disabled by default
+	}
+}
+
+// NewHandlerWithIdempotency creates a handler with idempotency support
+func NewHandlerWithIdempotency(logger *zap.Logger, repo NotificationRepository, idempotency *redis.IdempotencyService) *Handler {
+	return &Handler{
+		logger:      logger,
+		repo:        repo,
+		idempotency: idempotency,
+		producer:    nil, // SQS disabled by default
+	}
+}
+
+// NewHandlerWithSQS creates a handler with SQS producer support
+func NewHandlerWithSQS(logger *zap.Logger, repo NotificationRepository, idempotency *redis.IdempotencyService, producer *sqs.Producer) *Handler {
+	return &Handler{
+		logger:      logger,
+		repo:        repo,
+		idempotency: idempotency,
+		producer:    producer,
 	}
 }
 
 // CreateNotification handles POST /v1/notifications
+// Supports idempotency via the Idempotency-Key header.
 func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Extract Idempotency-Key header (optional but recommended)
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+
 	var req NotificationRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -103,6 +135,31 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check idempotency if key provided
+	if idempotencyKey != "" && h.idempotency != nil {
+		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
+
+		if err != nil {
+			if errors.Is(err, redis.ErrDuplicateRequest) {
+				h.writeError(w, http.StatusConflict, "duplicate_request",
+					"Request is already being processed",
+					"Another request with this idempotency key is in progress")
+				return
+			}
+			h.logger.Warn("idempotency check failed, proceeding",
+				zap.Error(err),
+				zap.String("idempotency_key", idempotencyKey),
+			)
+		} else if cachedResult != nil {
+			resp := NotificationResponse{ID: cachedResult.NotificationID}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Idempotency-Replayed", "true")
+			w.WriteHeader(cachedResult.StatusCode)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+	}
+
 	// Create notification
 	notif := &db.Notification{
 		ID:       uuid.New(),
@@ -128,11 +185,40 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("notification created",
 		zap.String("id", notif.ID.String()),
 		zap.String("tenant_id", req.TenantID),
-		zap.String("user_id", req.UserID),
 		zap.String("channel", req.Channel),
 	)
 
-	// TODO: Enqueue to SQS
+	// Store idempotency result
+	if idempotencyKey != "" && h.idempotency != nil {
+		result := &redis.IdempotencyResult{
+			NotificationID: notif.ID.String(),
+			StatusCode:     http.StatusCreated,
+		}
+		if err := h.idempotency.Store(ctx, req.TenantID, idempotencyKey, result); err != nil {
+			h.logger.Warn("failed to store idempotency result",
+				zap.Error(err),
+				zap.String("idempotency_key", idempotencyKey),
+			)
+		}
+	}
+
+	// Enqueue to SQS for asynchronous processing
+	if h.producer != nil {
+		if msgID, err := h.producer.Enqueue(ctx, notif); err != nil {
+			h.logger.Error("failed to enqueue notification to sqs",
+				zap.Error(err),
+				zap.String("notification_id", notif.ID.String()),
+			)
+			// Continue with error response - SQS enqueue failure is not a client error
+			h.writeError(w, http.StatusInternalServerError, "enqueue_error", "Failed to enqueue notification", "")
+			return
+		} else {
+			h.logger.Info("notification enqueued to sqs",
+				zap.String("notification_id", notif.ID.String()),
+				zap.String("sqs_message_id", msgID),
+			)
+		}
+	}
 
 	resp := NotificationResponse{
 		ID: notif.ID.String(),
