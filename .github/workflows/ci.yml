@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:  # Allow manual deployment
 
 env:
   GO_VERSION: '1.23'
@@ -114,7 +115,7 @@ jobs:
     name: Docker Build & Push
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'  # Only run on manual trigger
 
     permissions:
       id-token: write
@@ -148,7 +149,7 @@ jobs:
     name: Deploy to ECS
     runs-on: ubuntu-latest
     needs: [migrate]
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'  # Only run on manual trigger
     environment: production
 
     permissions:
@@ -173,7 +174,7 @@ jobs:
     name: Run DB migrations
     runs-on: ubuntu-latest
     needs: [docker]
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'  # Only run on manual trigger
 
     permissions:
       id-token: write
