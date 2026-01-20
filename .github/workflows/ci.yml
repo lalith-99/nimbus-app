@@ -1,0 +1,291 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: '1.23'
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: nimbus
+          POSTGRES_PASSWORD: nimbus123
+          POSTGRES_DB: nimbus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: nimbus
+          DB_PASSWORD: nimbus123
+          DB_NAME: nimbus
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build binary
+        run: CGO_ENABLED=0 GOOS=linux go build -o nimbus-gateway ./cmd/gateway
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimbus-gateway
+          path: nimbus-gateway
+
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: nimbus-prod
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [migrate]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster nimbus-prod \
+            --service nimbus-prod \
+            --force-new-deployment
+
+  migrate:
+    name: Run DB migrations
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr-migrator
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push migrator image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-migrator.outputs.registry }}
+          ECR_REPOSITORY: nimbus-prod
+          IMAGE_TAG: migrator-${{ github.sha }}
+        run: |
+          docker build -f Dockerfile.migrator -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:migrator-latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:migrator-latest
+
+      - name: Run migrations via one-off ECS task
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          CLUSTER: nimbus-prod
+          SERVICE: nimbus-prod
+          DB_USER: nimbus
+          DB_NAME: nimbus
+          LOG_GROUP: /ecs/nimbus-prod
+          ECR_REGISTRY: ${{ steps.login-ecr-migrator.outputs.registry }}
+          ECR_REPOSITORY: nimbus-prod
+          IMAGE_TAG: migrator-${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          SERVICE_DESC=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE")
+          TASK_DEF_ARN=$(echo "$SERVICE_DESC" | jq -r '.services[0].taskDefinition')
+          NETWORK_CFG=$(echo "$SERVICE_DESC" | jq -r '.services[0].networkConfiguration.awsvpcConfiguration')
+          SUBNETS=$(echo "$NETWORK_CFG" | jq -r '.subnets | join(",")')
+          SECURITY_GROUPS=$(echo "$NETWORK_CFG" | jq -r '.securityGroups | join(",")')
+
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition "$TASK_DEF_ARN")
+          EXEC_ROLE=$(echo "$TASK_DEF" | jq -r '.taskDefinition.executionRoleArn')
+          TASK_ROLE=$(echo "$TASK_DEF" | jq -r '.taskDefinition.taskRoleArn')
+          CPU=$(echo "$TASK_DEF" | jq -r '.taskDefinition.cpu')
+          MEMORY=$(echo "$TASK_DEF" | jq -r '.taskDefinition.memory')
+
+          DB_HOST=$(aws rds describe-db-instances --db-instance-identifier nimbus-prod --query "DBInstances[0].Endpoint.Address" --output text)
+          DB_PASSWORD=$(aws secretsmanager get-secret-value --secret-id nimbus-prod-db-password --query SecretString --output text)
+          DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}?sslmode=require"
+
+          cat > /tmp/migrator-td.json <<EOF
+          {
+            "family": "nimbus-migrator",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "${CPU}",
+            "memory": "${MEMORY}",
+            "executionRoleArn": "${EXEC_ROLE}",
+            "taskRoleArn": "${TASK_ROLE}",
+            "containerDefinitions": [
+              {
+                "name": "migrator",
+                "image": "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}",
+                "essential": true,
+                "environment": [
+                  { "name": "DATABASE_URL", "value": "${DATABASE_URL}" }
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "${LOG_GROUP}",
+                    "awslogs-region": "${AWS_REGION}",
+                    "awslogs-stream-prefix": "migrator"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+          TASK_DEF_MIGRATOR=$(aws ecs register-task-definition --cli-input-json file:///tmp/migrator-td.json --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          RUN_OUTPUT=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --launch-type FARGATE \
+            --task-definition "$TASK_DEF_MIGRATOR" \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUPS}],assignPublicIp=DISABLED}")
+
+          TASK_ARN=$(echo "$RUN_OUTPUT" | jq -r '.tasks[0].taskArn')
+          if [ "$TASK_ARN" = "null" ] || [ -z "$TASK_ARN" ]; then
+            echo "Failed to start migration task" >&2
+            echo "$RUN_OUTPUT" >&2
+            exit 1
+          fi
+
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" | jq -r '.tasks[0].containers[0].exitCode')
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "Migration task failed with exit code $EXIT_CODE" >&2
+            LOG_STREAM=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" | jq -r '.tasks[0].containers[0].logConfiguration.options["awslogs-stream"]')
+            echo "Check CloudWatch logs for details (group ${LOG_GROUP}, stream prefix migrator)" >&2
+            exit 1
+          fi
+
+          echo "Migrations completed successfully"

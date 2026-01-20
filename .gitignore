@@ -29,16 +29,20 @@ coverage.html
 .DS_Store
 
 # Terraform
+terraform.tfvars
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
 *.tfstate
 *.tfstate.*
 .terraform/
 .terraform.lock.hcl
 
-# docs
-docs/
+# Secrets
 .env
 
-# Other projects (not part of nimbus)
+# Local scratch (not part of nimbus)
 echostream/
 llm-learning/
 my-filestream/

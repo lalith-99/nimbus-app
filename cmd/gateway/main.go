@@ -16,6 +16,7 @@ import (
 	"github.com/lalithlochan/nimbus/internal/api"
 	"github.com/lalithlochan/nimbus/internal/config"
 	"github.com/lalithlochan/nimbus/internal/db"
+	"github.com/lalithlochan/nimbus/internal/metrics"
 	"github.com/lalithlochan/nimbus/internal/observ"
 	"github.com/lalithlochan/nimbus/internal/redis"
 	"github.com/lalithlochan/nimbus/internal/sqs"
@@ -149,6 +150,7 @@ func run() error {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(metrics.Middleware)
 
 	// Custom logging middleware
 	r.Use(func(next http.Handler) http.Handler {
@@ -198,6 +200,9 @@ func run() error {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+
+	// Prometheus metrics endpoint
+	r.Handle("/metrics", metrics.Handler())
 
 	// Setup HTTP server
 	srv := &http.Server{
