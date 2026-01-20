@@ -241,7 +241,7 @@ func (r *Repository) MoveToDeadLetter(ctx context.Context, notif *Notification, 
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Insert into dead letter queue
 	dlq := &DeadLetterNotification{
@@ -400,7 +400,7 @@ func (r *Repository) RetryDeadLetter(ctx context.Context, dlqID uuid.UUID) (*Not
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Create new notification
 	newNotif := &Notification{

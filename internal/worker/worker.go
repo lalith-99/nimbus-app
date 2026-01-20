@@ -88,7 +88,7 @@ func (w *Worker) processBatch(ctx context.Context) {
 
 func (w *Worker) processNotification(ctx context.Context, notif *db.Notification) {
 	// Mark as processing first to prevent duplicate picks
-	w.repo.UpdateNotificationStatus(ctx, notif.ID, "processing", notif.Attempt, nil, notif.NextRetryAt)
+	_ = w.repo.UpdateNotificationStatus(ctx, notif.ID, "processing", notif.Attempt, nil, notif.NextRetryAt)
 
 	err := w.sender.Send(ctx, notif)
 	newAttempt := notif.Attempt + 1
@@ -118,13 +118,13 @@ func (w *Worker) processNotification(ctx context.Context, notif *db.Notification
 			}
 		} else {
 			nextRetry := w.calculateNextRetry(newAttempt)
-			w.repo.UpdateNotificationStatus(ctx, notif.ID, "pending", newAttempt, &errMsg, &nextRetry)
+			_ = w.repo.UpdateNotificationStatus(ctx, notif.ID, "pending", newAttempt, &errMsg, &nextRetry)
 		}
 	} else {
 		w.logger.Info("notification sent",
 			zap.String("id", notif.ID.String()),
 		)
-		w.repo.UpdateNotificationStatus(ctx, notif.ID, "sent", newAttempt, nil, nil)
+		_ = w.repo.UpdateNotificationStatus(ctx, notif.ID, "sent", newAttempt, nil, nil)
 	}
 }
 

@@ -155,7 +155,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Idempotency-Replayed", "true")
 			w.WriteHeader(cachedResult.StatusCode)
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 	}
@@ -226,7 +226,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // GetNotification handles GET /v1/notifications/{id}
@@ -261,7 +261,7 @@ func (h *Handler) GetNotification(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(notif)
+	_ = json.NewEncoder(w).Encode(notif)
 }
 
 // ListNotifications handles GET /v1/notifications?tenant_id=xxx&limit=20&offset=0

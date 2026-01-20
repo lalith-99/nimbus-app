@@ -42,7 +42,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	logger.Info("starting nimbus gateway",
 		zap.String("env", cfg.Env),
@@ -198,7 +198,7 @@ func run() error {
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	})
 
 	// Prometheus metrics endpoint
