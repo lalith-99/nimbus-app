@@ -136,10 +136,10 @@ func (m *MockRepository) DiscardDeadLetter(ctx context.Context, id uuid.UUID) er
 
 func TestCreateNotification(t *testing.T) {
 	tests := []struct {
-		name           string
-		requestBody    interface{}
-		expectedStatus int
-		checkResponse  func(*testing.T, *httptest.ResponseRecorder)
+		checkResponse  func(*testing.T, *httptest.ResponseRecorder) // 8 bytes
+		requestBody    interface{}                                  // 16 bytes
+		name           string                                       // 16 bytes
+		expectedStatus int                                          // 8 bytes
 	}{
 		{
 			name: "valid email notification",
@@ -308,11 +308,11 @@ func TestCreateNotification(t *testing.T) {
 // TestGetNotification tests the GetNotification handler
 func TestGetNotification(t *testing.T) {
 	tests := []struct {
-		name           string
-		notificationID string
-		setupMock      func(*MockRepository)
-		expectedStatus int
-		checkResponse  func(*testing.T, *httptest.ResponseRecorder)
+		setupMock      func(*MockRepository)                        // 8 bytes
+		checkResponse  func(*testing.T, *httptest.ResponseRecorder) // 8 bytes
+		name           string                                       // 16 bytes
+		notificationID string                                       // 16 bytes
+		expectedStatus int                                          // 8 bytes
 	}{
 		{
 			name:           "valid notification exists",
@@ -428,11 +428,11 @@ func TestGetNotification(t *testing.T) {
 // TestListNotifications tests the ListNotifications handler
 func TestListNotifications(t *testing.T) {
 	tests := []struct {
-		name           string
-		queryParams    string
-		setupMock      func(*MockRepository)
-		expectedStatus int
-		checkResponse  func(*testing.T, *httptest.ResponseRecorder)
+		setupMock      func(*MockRepository)                        // 8 bytes
+		checkResponse  func(*testing.T, *httptest.ResponseRecorder) // 8 bytes
+		name           string                                       // 16 bytes
+		queryParams    string                                       // 16 bytes
+		expectedStatus int                                          // 8 bytes
 	}{
 		{
 			name:        "list notifications for tenant",

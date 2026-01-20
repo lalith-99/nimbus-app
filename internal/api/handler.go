@@ -53,10 +53,10 @@ type ErrorResponse struct {
 
 // Handler holds dependencies for API handlers
 type Handler struct {
-	idempotency *redis.IdempotencyService // nil if Redis not configured
-	producer    *sqs.Producer             // nil if SQS not configured
-	logger      *zap.Logger
-	repo        NotificationRepository
+	repo        NotificationRepository    // 16 bytes (interface = 2 pointers)
+	idempotency *redis.IdempotencyService // 8 bytes
+	producer    *sqs.Producer             // 8 bytes
+	logger      *zap.Logger               // 8 bytes
 }
 
 // NewHandler creates a new API handler
@@ -554,7 +554,7 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, errType, title, 
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 
-	json.NewEncoder(w).Encode(ErrorResponse{
+	_ = json.NewEncoder(w).Encode(ErrorResponse{
 		Type:   errType,
 		Title:  title,
 		Status: status,

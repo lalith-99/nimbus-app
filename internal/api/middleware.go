@@ -44,7 +44,7 @@ func RateLimitMiddleware(limiter *redis.RateLimiter, logger *zap.Logger, keyFunc
 				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter)))
 				w.Header().Set("Content-Type", "application/problem+json")
 				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(ErrorResponse{
+			_ = json.NewEncoder(w).Encode(ErrorResponse{
 					Type:   "rate_limit_exceeded",
 					Title:  "Too Many Requests",
 					Status: http.StatusTooManyRequests,
