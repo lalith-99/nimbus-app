@@ -53,10 +53,10 @@ type ErrorResponse struct {
 
 // Handler holds dependencies for API handlers
 type Handler struct {
-	repo        NotificationRepository
 	idempotency *redis.IdempotencyService // nil if Redis not configured
 	producer    *sqs.Producer             // nil if SQS not configured
 	logger      *zap.Logger
+	repo        NotificationRepository
 }
 
 // NewHandler creates a new API handler
@@ -339,8 +339,8 @@ func (h *Handler) UpdateNotificationStatus(w http.ResponseWriter, r *http.Reques
 
 	// Parse request body
 	var req struct {
-		Status  string  `json:"status"`
 		Error   *string `json:"error,omitempty"`
+		Status  string  `json:"status"`
 		Attempt int     `json:"attempt"`
 	}
 
@@ -478,7 +478,7 @@ func (h *Handler) GetDeadLetterItem(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(dlqItem)
+	_ = json.NewEncoder(w).Encode(dlqItem)
 }
 
 // RetryDeadLetterItem handles POST /v1/dlq/{id}/retry
@@ -510,7 +510,7 @@ func (h *Handler) RetryDeadLetterItem(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"id":                  idStr,
 		"status":              "retried",
 		"new_notification_id": newNotif.ID.String(),
@@ -544,7 +544,7 @@ func (h *Handler) DiscardDeadLetterItem(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"id":     idStr,
 		"status": "discarded",
 	})
