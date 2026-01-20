@@ -12,14 +12,14 @@ type Notification struct {
 	ID           uuid.UUID       `json:"id"`
 	TenantID     uuid.UUID       `json:"tenant_id"`
 	UserID       uuid.UUID       `json:"user_id"`
-	Channel      string          `json:"channel"`
 	Payload      json.RawMessage `json:"payload"`
-	Status       string          `json:"status"`
-	Attempt      int             `json:"attempt"`
-	ErrorMessage *string         `json:"error_message,omitempty"`
-	NextRetryAt  *time.Time      `json:"next_retry_at,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
+	NextRetryAt  *time.Time      `json:"next_retry_at,omitempty"`
+	ErrorMessage *string         `json:"error_message,omitempty"`
+	Channel      string          `json:"channel"`
+	Status       string          `json:"status"`
+	Attempt      int             `json:"attempt"`
 }
 
 // Status constants
@@ -51,12 +51,12 @@ type DeadLetterNotification struct {
 	OriginalNotificationID uuid.UUID       `json:"original_notification_id"`
 	TenantID               uuid.UUID       `json:"tenant_id"`
 	UserID                 uuid.UUID       `json:"user_id"`
-	Channel                string          `json:"channel"`
 	Payload                json.RawMessage `json:"payload"`
-	Attempts               int             `json:"attempts"`
-	LastError              string          `json:"last_error"`
-	Status                 string          `json:"status"`
-	RetriedNotificationID  *uuid.UUID      `json:"retried_notification_id,omitempty"`
 	CreatedAt              time.Time       `json:"created_at"`
 	UpdatedAt              time.Time       `json:"updated_at"`
+	RetriedNotificationID  *uuid.UUID      `json:"retried_notification_id,omitempty"`
+	Channel                string          `json:"channel"`
+	LastError              string          `json:"last_error"`
+	Status                 string          `json:"status"`
+	Attempts               int             `json:"attempts"`
 }

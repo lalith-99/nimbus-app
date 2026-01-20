@@ -53,10 +53,10 @@ type ErrorResponse struct {
 
 // Handler holds dependencies for API handlers
 type Handler struct {
-	logger      *zap.Logger
 	repo        NotificationRepository
 	idempotency *redis.IdempotencyService // nil if Redis not configured
-	producer    *sqs.Producer              // nil if SQS not configured
+	producer    *sqs.Producer             // nil if SQS not configured
+	logger      *zap.Logger
 }
 
 // NewHandler creates a new API handler
@@ -317,7 +317,7 @@ func (h *Handler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"data":   notifications,
 		"limit":  limit,
 		"offset": offset,
@@ -390,7 +390,7 @@ func (h *Handler) UpdateNotificationStatus(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"id":     idStr,
 		"status": req.Status,
 	})
@@ -447,7 +447,7 @@ func (h *Handler) ListDeadLetterQueue(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"data":   dlqItems,
 		"limit":  limit,
 		"offset": offset,

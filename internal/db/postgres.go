@@ -18,11 +18,11 @@ type DB struct {
 // Config holds database connection parameters
 type Config struct {
 	Host     string
-	Port     int
-	User     string
 	Password string
+	User     string
 	Database string
 	SSLMode  string
+	Port     int
 }
 
 // New creates a new database connection pool
