@@ -77,21 +77,33 @@ echo ""
 # Step 4: Run database migrations
 echo -e "${YELLOW}[4/5] Running database migrations...${NC}"
 
-# Get VPC networking details
+# Get VPC networking details from Terraform state
 cd "$TERRAFORM_DIR"
-SUBNET_IDS=$(terraform output -raw private_subnet_ids 2>/dev/null || echo "")
-SECURITY_GROUP_ID=$(terraform output -raw ecs_security_group_id 2>/dev/null || echo "")
 
-if [ -z "$SUBNET_IDS" ] || [ -z "$SECURITY_GROUP_ID" ]; then
-  # Fallback: extract from state if outputs don't exist
-  echo "Warning: Some outputs not available, extracting from Terraform state..."
-  SUBNET_IDS=$(terraform state list 'module.vpc.aws_subnet.private[*]' 2>/dev/null | \
-    xargs -I {} terraform state show {} 2>/dev/null | \
-    grep 'id.*=' | head -2 | awk '{print $NF}' | tr -d '"' | paste -sd ',' - || echo "")
-  
-  # For now, we'll use a simplified approach without explicit security group
-  echo "Note: Using default security group for migrator task"
+# Extract private subnet IDs
+PRIVATE_SUBNET_1=$(terraform state show 'module.vpc.aws_subnet.private[0]' 2>/dev/null | grep 'id' | head -1 | awk '{print $NF}' | tr -d '"' || echo "")
+PRIVATE_SUBNET_2=$(terraform state show 'module.vpc.aws_subnet.private[1]' 2>/dev/null | grep 'id' | head -1 | awk '{print $NF}' | tr -d '"' || echo "")
+
+if [ -z "$PRIVATE_SUBNET_1" ]; then
+  echo -e "${RED}✗ Could not extract private subnets from Terraform state${NC}"
+  exit 1
 fi
+
+SUBNET_IDS="$PRIVATE_SUBNET_1"
+if [ -n "$PRIVATE_SUBNET_2" ]; then
+  SUBNET_IDS="$PRIVATE_SUBNET_1,$PRIVATE_SUBNET_2"
+fi
+
+# Extract ECS security group ID
+SECURITY_GROUP_ID=$(terraform state show 'aws_security_group.ecs' 2>/dev/null | grep 'id' | head -1 | awk '{print $NF}' | tr -d '"' || echo "")
+
+if [ -z "$SECURITY_GROUP_ID" ]; then
+  echo -e "${YELLOW}Warning: Could not find ECS security group, using ALB security group${NC}"
+  SECURITY_GROUP_ID=$(terraform state show 'aws_security_group.alb' 2>/dev/null | grep 'id' | head -1 | awk '{print $NF}' | tr -d '"' || echo "")
+fi
+
+echo "Subnets: $SUBNET_IDS"
+echo "Security Group: $SECURITY_GROUP_ID"
 
 echo "Registering migrator task definition..."
 # Get existing task definition and update image
@@ -130,20 +142,25 @@ TASK_ARN=$(aws ecs run-task \
   --cluster "$ECS_CLUSTER" \
   --task-definition "nimbus-migrator" \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-12345678],assignPublicIp=ENABLED}" \
+  --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SECURITY_GROUP_ID}],assignPublicIp=ENABLED}" \
   --region "$AWS_REGION" \
   --query 'tasks[0].taskArn' \
-  --output text 2>/dev/null || echo "")
+  --output text 2>&1)
 
-if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" == "None" ]; then
+if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" == "None" ] || echo "$TASK_ARN" | grep -q "Error\|error"; then
   echo -e "${RED}✗ Failed to start migration task${NC}"
-  echo "This may be due to missing VPC configuration. Please check:"
-  echo "  1. Terraform outputs are correct"
-  echo "  2. Task definition 'nimbus-migrator' exists in ECS"
-  echo "  3. Security groups and subnets are properly configured"
+  echo "Error: $TASK_ARN"
   echo ""
-  echo "You can manually run migrations with:"
-  echo "  aws ecs run-task --cluster $ECS_CLUSTER --task-definition nimbus-migrator --launch-type FARGATE ..."
+  echo "This may be due to:"
+  echo "  1. Missing VPC configuration in Terraform state"
+  echo "  2. Task definition 'nimbus-migrator' not exists in ECS"
+  echo "  3. Invalid security group or subnet IDs"
+  echo ""
+  echo "Current configuration:"
+  echo "  Subnets: $SUBNET_IDS"
+  echo "  Security Group: $SECURITY_GROUP_ID"
+  echo ""
+  echo "You can manually create and run the migrator task with proper VPC config."
   exit 1
 fi
 

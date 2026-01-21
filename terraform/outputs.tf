@@ -8,6 +8,11 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.main.repository_url
 }
 
+output "ecr_migrator_repository_url" {
+  description = "ECR migrator repository URL"
+  value       = aws_ecr_repository.migrator.repository_url
+}
+
 output "rds_endpoint" {
   description = "RDS endpoint"
   value       = aws_db_instance.main.address
