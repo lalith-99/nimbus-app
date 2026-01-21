@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -89,12 +91,22 @@ func NewHandlerWithSQS(logger *zap.Logger, repo NotificationRepository, idempote
 	}
 }
 
+// generateContentHash creates a SHA256 hash from the notification request content.
+// This enables automatic deduplication - identical requests within the TTL window
+// will return the same notification ID instead of creating duplicates.
+func generateContentHash(req NotificationRequest) string {
+	// Combine all fields that define uniqueness
+	content := req.TenantID + "|" + req.UserID + "|" + req.Channel + "|" + string(req.Payload)
+	hash := sha256.Sum256([]byte(content))
+	return "auto:" + hex.EncodeToString(hash[:16]) // Use first 16 bytes (32 hex chars)
+}
+
 // CreateNotification handles POST /v1/notifications
-// Supports idempotency via the Idempotency-Key header.
+// Supports idempotency via the Idempotency-Key header or automatic content-based deduplication.
 func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Extract Idempotency-Key header (optional but recommended)
+	// Extract Idempotency-Key header (optional - will auto-generate from content if not provided)
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 
 	var req NotificationRequest
@@ -135,7 +147,16 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check idempotency if key provided
+	// Auto-generate idempotency key from content if not provided
+	// This prevents duplicate notifications with identical content
+	if idempotencyKey == "" && h.idempotency != nil {
+		idempotencyKey = generateContentHash(req)
+		h.logger.Debug("auto-generated idempotency key from content",
+			zap.String("idempotency_key", idempotencyKey),
+		)
+	}
+
+	// Check idempotency
 	if idempotencyKey != "" && h.idempotency != nil {
 		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
 
