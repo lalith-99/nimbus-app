@@ -80,8 +80,6 @@ func (p *Producer) Enqueue(ctx context.Context, notif *db.Notification) (string,
 	input := &sqs.SendMessageInput{
 		QueueUrl:    aws.String(p.queueURL),
 		MessageBody: aws.String(string(body)),
-		// Use deduplication ID for FIFO queues with content-based deduplication
-		MessageDeduplicationId: aws.String(notif.ID.String()),
 	}
 
 	result, err := p.client.SendMessage(ctx, input)
