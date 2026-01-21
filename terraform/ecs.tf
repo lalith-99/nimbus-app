@@ -2,6 +2,7 @@
 resource "aws_ecr_repository" "main" {
   name                 = local.name
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = true
@@ -33,6 +34,7 @@ resource "aws_ecr_lifecycle_policy" "main" {
 resource "aws_ecr_repository" "migrator" {
   name                 = "${local.name}-migrator"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = true
@@ -278,7 +280,7 @@ resource "aws_lb" "main" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = module.vpc.public_subnets
 
-  enable_deletion_protection = var.environment == "prod"
+  enable_deletion_protection = false
 }
 
 resource "aws_lb_target_group" "main" {

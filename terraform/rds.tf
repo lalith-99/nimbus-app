@@ -48,8 +48,9 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  multi_az            = var.environment == "prod"
-  skip_final_snapshot = var.environment != "prod"
+  multi_az               = var.environment == "prod"
+  skip_final_snapshot    = true
+  final_snapshot_identifier = null
 
   backup_retention_period = var.environment == "prod" ? 7 : 1
   backup_window           = "03:00-04:00"
