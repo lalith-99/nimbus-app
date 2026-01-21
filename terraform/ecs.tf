@@ -117,7 +117,10 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = [aws_secretsmanager_secret.db_password.arn]
+        Resource = [
+          aws_secretsmanager_secret.db_password.arn,
+          aws_secretsmanager_secret.database_url.arn
+        ]
       }
     ]
   })
@@ -233,12 +236,17 @@ resource "aws_ecs_task_definition" "main" {
         { name = "SQS_DLQ_URL", value = aws_sqs_queue.dlq.url },
         { name = "SNS_TOPIC_ARN", value = aws_sns_topic.notifications.arn },
         { name = "SES_FROM_EMAIL", value = var.ses_from_email },
+        { name = "MIGRATIONS_DIR", value = "/app/migrations" },
       ]
 
       secrets = [
         {
           name      = "DB_PASSWORD"
           valueFrom = aws_secretsmanager_secret.db_password.arn
+        },
+        {
+          name      = "DATABASE_URL"
+          valueFrom = aws_secretsmanager_secret.database_url.arn
         }
       ]
 
