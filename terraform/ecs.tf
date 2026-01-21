@@ -187,6 +187,12 @@ resource "aws_cloudwatch_log_group" "main" {
   retention_in_days = 30
 }
 
+# CloudWatch Log Group for Migrator
+resource "aws_cloudwatch_log_group" "migrator" {
+  name              = "/ecs/nimbus-migrator"
+  retention_in_days = 7
+}
+
 # ECS Task Definition
 resource "aws_ecs_task_definition" "main" {
   family                   = local.name
@@ -349,4 +355,42 @@ resource "aws_appautoscaling_policy" "cpu" {
     scale_in_cooldown  = 300
     scale_out_cooldown = 60
   }
+}
+
+# ECS Task Definition for Migrator
+resource "aws_ecs_task_definition" "migrator" {
+  family                   = "${local.name}-migrator"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "migrator"
+      image     = "${aws_ecr_repository.migrator.repository_url}:latest"
+      essential = true
+
+      environment = [
+        { name = "MIGRATIONS_DIR", value = "/migrations" },
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = aws_secretsmanager_secret.database_url.arn
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.migrator.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "ecs"
+        }
+      }
+    }
+  ])
 }

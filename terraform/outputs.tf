@@ -47,3 +47,13 @@ output "ecs_service_name" {
   description = "ECS service name"
   value       = aws_ecs_service.main.name
 }
+
+output "private_subnet_ids" {
+  description = "Private subnet IDs"
+  value       = module.vpc.private_subnets
+}
+
+output "ecs_security_group_id" {
+  description = "ECS security group ID"
+  value       = aws_security_group.ecs.id
+}

@@ -19,6 +19,17 @@ resource "aws_secretsmanager_secret_version" "db_password" {
   secret_string = random_password.db_password.result
 }
 
+# Database URL secret for migrator
+resource "aws_secretsmanager_secret" "database_url" {
+  name                    = "${local.name}-database-url"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "database_url" {
+  secret_id = aws_secretsmanager_secret.database_url.id
+  secret_string = "postgresql://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.address}:5432/${var.db_name}?sslmode=require"
+}
+
 resource "aws_db_instance" "main" {
   identifier = local.name
 
