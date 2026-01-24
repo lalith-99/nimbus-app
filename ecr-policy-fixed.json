@@ -23,10 +23,14 @@
     },
     {
       "Effect": "Allow",
+      "Action": "ecs:DescribeTaskDefinition",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
       "Action": [
         "ecs:UpdateService",
         "ecs:DescribeServices",
-        "ecs:DescribeTaskDefinition",
         "ecs:RegisterTaskDefinition",
         "ecs:RunTask",
         "ecs:DescribeTasks"

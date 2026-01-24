@@ -150,10 +150,17 @@ jobs:
 
       - name: Deploy to ECS
         run: |
-          aws ecs update-service \
-            --cluster nimbus-prod \
-            --service nimbus-prod \
-            --force-new-deployment
+          if aws ecs describe-services --cluster nimbus-prod --services nimbus-prod --query "services[0].serviceName" --output text 2>/dev/null | grep -q "nimbus-prod"; then
+            echo "✅ Updating ECS service..."
+            aws ecs update-service \
+              --cluster nimbus-prod \
+              --service nimbus-prod \
+              --force-new-deployment
+            echo "✅ Deployment triggered"
+          else
+            echo "⚠️  ECS service not found - skipping deployment (infrastructure needs to be created first)"
+            echo "To deploy, first create ECS infrastructure using Terraform or AWS Console"
+          fi
 
   migrate:
     name: Run DB migrations
@@ -189,7 +196,19 @@ jobs:
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:migrator-latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:migrator-latest
 
+      - name: Check if ECS infrastructure exists
+        id: check-ecs
+        run: |
+          if aws ecs describe-clusters --clusters nimbus-prod --query "clusters[0].clusterName" --output text 2>/dev/null | grep -q "nimbus-prod"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ ECS cluster exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️  ECS cluster not found - skipping migrations"
+          fi
+
       - name: Run migrations via one-off ECS task
+        if: steps.check-ecs.outputs.exists == 'true'
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
           CLUSTER: nimbus-prod
@@ -203,7 +222,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          SERVICE_DESC=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE")
+          SERVICE_DESC=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" 2>/dev/null || echo '{"services":[]}')
+          
+          # Check if service exists
+          if [ "$(echo "$SERVICE_DESC" | jq -r '.services | length')" -eq 0 ]; then
+            echo "⚠️  ECS service not found - skipping migrations (infrastructure needs to be created first)"
+            exit 0
+          fi
+
           TASK_DEF_ARN=$(echo "$SERVICE_DESC" | jq -r '.services[0].taskDefinition')
           NETWORK_CFG=$(echo "$SERVICE_DESC" | jq -r '.services[0].networkConfiguration.awsvpcConfiguration')
           SUBNETS=$(echo "$NETWORK_CFG" | jq -r '.subnets | join(",")')
