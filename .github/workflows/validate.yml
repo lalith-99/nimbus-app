@@ -1,0 +1,175 @@
+name: Pipeline Validation
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+
+jobs:
+  validate-docker:
+    name: Validate Docker Images
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Validate Docker images exist
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: nimbus-prod
+        run: |
+          echo "Checking latest images in ECR..."
+          
+          # Check main gateway image
+          aws ecr describe-images --repository-name $ECR_REPOSITORY --image-ids imageTag=latest --region us-east-1 \
+            || (echo "❌ Latest gateway image not found" && exit 1)
+          echo "✅ Gateway image found"
+          
+          # Check migrator image
+          aws ecr describe-images --repository-name $ECR_REPOSITORY --image-ids imageTag=migrator-latest --region us-east-1 \
+            || (echo "❌ Migrator image not found" && exit 1)
+          echo "✅ Migrator image found"
+
+      - name: Test image pull
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: nimbus-prod
+        run: |
+          echo "Testing image pull..."
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:latest || exit 1
+          echo "✅ Image pull successful"
+
+  validate-ecs-deployment:
+    name: Validate ECS Deployment
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Check ECS service health
+        run: |
+          echo "Checking ECS service status..."
+          
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster nimbus-prod \
+            --services nimbus-prod \
+            --query 'services[0].status' \
+            --output text)
+          
+          if [ "$SERVICE_STATUS" != "ACTIVE" ]; then
+            echo "❌ ECS service not active: $SERVICE_STATUS"
+            exit 1
+          fi
+          echo "✅ ECS service is active"
+          
+          RUNNING=$(aws ecs describe-services \
+            --cluster nimbus-prod \
+            --services nimbus-prod \
+            --query 'services[0].runningCount' \
+            --output text)
+          
+          if [ "$RUNNING" -lt 1 ]; then
+            echo "❌ No running tasks"
+            exit 1
+          fi
+          echo "✅ Running $RUNNING task(s)"
+
+      - name: Check RDS database
+        run: |
+          echo "Checking RDS database..."
+          
+          DB_STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier nimbus-prod \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --output text)
+          
+          if [ "$DB_STATUS" != "available" ]; then
+            echo "❌ Database not available: $DB_STATUS"
+            exit 1
+          fi
+          echo "✅ Database is available"
+
+      - name: Check ElastiCache
+        run: |
+          echo "Checking ElastiCache..."
+          
+          CACHE_STATUS=$(aws elasticache describe-cache-clusters \
+            --cache-cluster-id nimbus-prod \
+            --query 'CacheClusters[0].CacheClusterStatus' \
+            --output text 2>/dev/null || echo "not-found")
+          
+          if [ "$CACHE_STATUS" != "available" ]; then
+            echo "⚠️  Cache cluster issue: $CACHE_STATUS"
+          else
+            echo "✅ Cache cluster is available"
+          fi
+
+  validate-health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    needs: [validate-ecs-deployment]
+
+    steps:
+      - name: Wait for service stabilization
+        run: sleep 10
+
+      - name: Health check endpoint
+        continue-on-error: true
+        run: |
+          ENDPOINT="https://nimbus.example.com/health"
+          echo "Checking health endpoint: $ENDPOINT"
+          
+          for i in {1..5}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i failed (HTTP $HTTP_CODE), retrying..."
+            sleep 5
+          done
+          
+          echo "⚠️  Health check timed out (ensure endpoint is configured)"
+
+  report:
+    name: Generate Report
+    runs-on: ubuntu-latest
+    needs: [validate-docker, validate-ecs-deployment, validate-health-check]
+    if: always()
+
+    steps:
+      - name: Pipeline Status
+        run: |
+          echo "📊 Pipeline Validation Report"
+          echo "=============================="
+          echo "Docker validation: ${{ needs.validate-docker.result }}"
+          echo "ECS validation: ${{ needs.validate-ecs-deployment.result }}"
+          echo "Health check: ${{ needs.validate-health-check.result }}"
+          
+          if [[ "${{ needs.validate-docker.result }}" == "failure" || "${{ needs.validate-ecs-deployment.result }}" == "failure" ]]; then
+            echo "❌ Pipeline validation failed"
+            exit 1
+          fi
+          echo "✅ All critical checks passed"

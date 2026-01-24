@@ -1,4 +1,10 @@
-.PHONY: help build run test clean deps test-cover test-quick lint dev
+.PHONY: help build run test clean deps test-cover test-quick lint dev docker-build docker-push validate ci-local
+
+# Configuration
+REGISTRY ?= 
+REPOSITORY ?= nimbus-prod
+IMAGE_TAG ?= latest
+GO_VERSION := 1.23
 
 test-cover: ## Run tests with coverage report
 	go test ./... -cover -coverprofile=coverage.out
@@ -25,7 +31,7 @@ deps: ## Download dependencies
 	go mod tidy
 
 build: ## Build all binaries
-	go build -o bin/gateway ./cmd/gateway
+	CGO_ENABLED=0 GOOS=linux go build -o bin/gateway ./cmd/gateway
 
 run-gateway: ## Run gateway locally
 	go run ./cmd/gateway/main.go
@@ -35,3 +41,34 @@ test: ## Run tests
 
 clean: ## Clean build artifacts
 	rm -rf bin/
+
+# Docker targets
+docker-build: ## Build Docker image
+	docker build -t $(REPOSITORY):$(IMAGE_TAG) .
+	@echo "✅ Docker image built: $(REPOSITORY):$(IMAGE_TAG)"
+
+docker-push: docker-build ## Push Docker image to registry
+	@if [ -z "$(REGISTRY)" ]; then \
+		echo "❌ REGISTRY not set. Usage: make docker-push REGISTRY=your-registry"; \
+		exit 1; \
+	fi
+	docker tag $(REPOSITORY):$(IMAGE_TAG) $(REGISTRY)/$(REPOSITORY):$(IMAGE_TAG)
+	docker push $(REGISTRY)/$(REPOSITORY):$(IMAGE_TAG)
+	docker tag $(REPOSITORY):$(IMAGE_TAG) $(REGISTRY)/$(REPOSITORY):latest
+	docker push $(REGISTRY)/$(REPOSITORY):latest
+	@echo "✅ Image pushed to $(REGISTRY)/$(REPOSITORY)"
+
+# CI automation
+ci-local: deps lint test build ## Run full CI pipeline locally
+	@echo "✅ Local CI pipeline passed"
+
+ci-docker: ci-local docker-build ## Run CI + Docker build locally
+	@echo "✅ CI + Docker pipeline complete"
+
+validate: ## Validate project structure and dependencies
+	@echo "🔍 Validating project..."
+	@go mod verify
+	@go vet ./...
+	@echo "✅ Project validation passed"
+
+all: validate ci-local ## Run full validation and CI
