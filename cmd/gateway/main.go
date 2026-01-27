@@ -48,7 +48,7 @@ func run() error {
 		zap.String("env", cfg.Env),
 		zap.Int("port", cfg.Port),
 		zap.String("version", "v1.0.1"),
-		zap.String("deployment_test", "2026-01-27"),
+		zap.String("deployment_test-2026-01-27", "true"),
 	)
 
 	// Initialize database connection
