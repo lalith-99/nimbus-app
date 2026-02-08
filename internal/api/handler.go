@@ -108,6 +108,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
 	// Extract Idempotency-Key header (optional - will auto-generate from content if not provided)
 	idempotencyKey := r.Header.Get("Idempotency-Key")
+	clientProvidedKey := idempotencyKey != "" // Track if client explicitly set the key
 
 	var req NotificationRequest
 
@@ -215,7 +216,13 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			NotificationID: notif.ID.String(),
 			StatusCode:     http.StatusCreated,
 		}
-		if err := h.idempotency.Store(ctx, req.TenantID, idempotencyKey, result); err != nil {
+		// Client-provided keys: 24h TTL (Stripe-style explicit dedup control)
+		// Auto-generated keys: 5min TTL (catch retries, allow intentional re-sends)
+		ttl := redis.IdempotencyTTL
+		if clientProvidedKey {
+			ttl = redis.IdempotencyTTLExact
+		}
+		if err := h.idempotency.Store(ctx, req.TenantID, idempotencyKey, result, ttl); err != nil {
 			h.logger.Warn("failed to store idempotency result",
 				zap.Error(err),
 				zap.String("idempotency_key", idempotencyKey),

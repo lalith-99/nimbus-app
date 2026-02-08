@@ -131,7 +131,38 @@ func run() error {
 		return fmt.Errorf("failed to create SES email sender: %w", err)
 	}
 
-	w := worker.New(repo, sender, worker.Config{
+	// Initialize SNS sender for SMS
+	snsSender, err := worker.NewSNSSender(ctx, worker.SNSConfig{
+		Region: cfg.SNSRegion,
+	}, logger)
+	if err != nil {
+		logger.Warn("SNS sender unavailable, SMS notifications disabled",
+			zap.Error(err),
+		)
+		snsSender = nil
+	}
+
+	// Initialize webhook sender
+	webhookSender := worker.NewWebhookSender(logger, worker.WebhookConfig{
+		DefaultTimeout: time.Duration(cfg.WebhookTimeout) * time.Second,
+	})
+
+	// Create multi-sender that routes to appropriate channel handler
+	var multiSender worker.Sender
+	if snsSender != nil {
+		multiSender = worker.NewMultiSender(logger, sender, snsSender, webhookSender)
+	} else {
+		// Fall back to email and webhook only if SNS unavailable
+		multiSender = worker.NewMultiSender(logger, sender, webhookSender)
+	}
+
+	logger.Info("initialized multi-channel notification system",
+		zap.Bool("email_enabled", true),
+		zap.Bool("sms_enabled", snsSender != nil),
+		zap.Bool("webhook_enabled", true),
+	)
+
+	w := worker.New(repo, multiSender, worker.Config{
 		PollInterval: 5 * time.Second,
 		BatchSize:    10,
 		MaxRetries:   5,

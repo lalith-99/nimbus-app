@@ -12,8 +12,13 @@ import (
 )
 
 const (
-	// IdempotencyTTL is how long idempotency keys are retained (24 hours).
-	IdempotencyTTL = 24 * time.Hour
+	// IdempotencyTTL is how long idempotency keys are retained.
+	// Industry standard: 5 minutes for auto-generated (content-based) keys
+	// to catch network retries without blocking intentional re-sends.
+	// Client-provided keys use a longer TTL (24h) since the client
+	// explicitly controls uniqueness — matching Stripe's approach.
+	IdempotencyTTL      = 5 * time.Minute // Auto-generated keys (retry protection)
+	IdempotencyTTLExact = 24 * time.Hour  // Client-provided keys (explicit dedup)
 
 	// processingTTL is the lock duration while a request is being processed.
 	processingTTL = 5 * time.Minute
@@ -82,7 +87,10 @@ func (s *IdempotencyService) Check(ctx context.Context, tenantID, idempotencyKey
 }
 
 // Store saves the result of a successfully processed request.
-func (s *IdempotencyService) Store(ctx context.Context, tenantID, idempotencyKey string, result *IdempotencyResult) error {
+// ttl controls how long the key is cached:
+//   - Auto-generated keys (content-based): 5 min — catches network retries
+//   - Client-provided keys (Idempotency-Key header): 24h — explicit dedup control
+func (s *IdempotencyService) Store(ctx context.Context, tenantID, idempotencyKey string, result *IdempotencyResult, ttl time.Duration) error {
 	key := s.buildKey(tenantID, idempotencyKey)
 
 	if result.CreatedAt == 0 {
@@ -94,7 +102,7 @@ func (s *IdempotencyService) Store(ctx context.Context, tenantID, idempotencyKey
 		return fmt.Errorf("failed to marshal result: %w", err)
 	}
 
-	if err := s.client.rdb.Set(ctx, key, data, IdempotencyTTL).Err(); err != nil {
+	if err := s.client.rdb.Set(ctx, key, data, ttl).Err(); err != nil {
 		return fmt.Errorf("redis set failed: %w", err)
 	}
 

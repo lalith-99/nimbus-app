@@ -68,6 +68,10 @@ func (m *MockSender) Send(ctx context.Context, notif *db.Notification) error {
 	return nil
 }
 
+func (m *MockSender) SupportsChannel(channel string) bool {
+	return true // MockSender supports all channels
+}
+
 func TestWorker_ProcessNotification_Success(t *testing.T) {
 	notifID := uuid.New()
 	repo := &MockRepository{}

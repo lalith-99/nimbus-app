@@ -73,7 +73,7 @@ func TestIdempotencyService_CachedResult(t *testing.T) {
 		CreatedAt:      time.Now().Unix(),
 	}
 
-	if err := svc.Store(ctx, "tenant-1", "key-1", stored); err != nil {
+	if err := svc.Store(ctx, "tenant-1", "key-1", stored, IdempotencyTTL); err != nil {
 		t.Fatalf("store failed: %v", err)
 	}
 
@@ -128,7 +128,7 @@ func TestIdempotencyService_ReserveThenStore(t *testing.T) {
 	if err := svc.Store(ctx, "tenant-1", "key-1", &IdempotencyResult{
 		NotificationID: "notif-789",
 		StatusCode:     201,
-	}); err != nil {
+	}, IdempotencyTTL); err != nil {
 		t.Fatalf("store failed: %v", err)
 	}
 

@@ -16,10 +16,6 @@ type Repository interface {
 	MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error)
 }
 
-type Sender interface {
-	Send(ctx context.Context, notif *db.Notification) error
-}
-
 type Worker struct {
 	repo   Repository
 	sender Sender

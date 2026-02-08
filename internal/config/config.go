@@ -37,8 +37,13 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string // sender email address
 
+	// AWS Services
 	AWSRegion    string
 	SESFromEmail string
+	SNSRegion    string // AWS region for SNS (SMS)
+
+	// Webhook config
+	WebhookTimeout int // Timeout for webhook requests in seconds
 }
 
 // Load reads configuration from environment variables with sensible defaults
@@ -186,6 +191,24 @@ func Load() (*Config, error) {
 
 	if url := os.Getenv("SQS_DLQ_URL"); url != "" {
 		cfg.SQSDLQURL = url
+	}
+
+	// SNS config for SMS
+	if region := os.Getenv("SNS_REGION"); region != "" {
+		cfg.SNSRegion = region
+	} else {
+		cfg.SNSRegion = cfg.AWSRegion
+	}
+
+	// Webhook config
+	if timeout := os.Getenv("WEBHOOK_TIMEOUT"); timeout != "" {
+		t, err := strconv.Atoi(timeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WEBHOOK_TIMEOUT: %w", err)
+		}
+		cfg.WebhookTimeout = t
+	} else {
+		cfg.WebhookTimeout = 30 // default 30 seconds
 	}
 
 	return cfg, nil

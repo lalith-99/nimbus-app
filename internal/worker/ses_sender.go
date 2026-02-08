@@ -38,9 +38,10 @@ func NewSESSender(ctx context.Context, cfg SESConfig, logger *zap.Logger) (*SESS
 	}, nil
 }
 
+// Send sends an email notification via AWS SES
 func (s *SESSender) Send(ctx context.Context, notif *db.Notification) error {
 	// Validate channel
-	if notif.Channel != "email" {
+	if notif.Channel != db.ChannelEmail {
 		return fmt.Errorf("SES sender only supports email, got: %s", notif.Channel)
 	}
 
@@ -49,6 +50,18 @@ func (s *SESSender) Send(ctx context.Context, notif *db.Notification) error {
 	if err := json.Unmarshal(notif.Payload, &payload); err != nil {
 		return fmt.Errorf("invalid email payload: %w", err)
 	}
+
+	// Validate required fields
+	if payload.To == "" {
+		return fmt.Errorf("email payload missing 'to' field")
+	}
+	if payload.Subject == "" {
+		return fmt.Errorf("email payload missing 'subject' field")
+	}
+	if payload.Body == "" {
+		return fmt.Errorf("email payload missing 'body' field")
+	}
+
 	// Build SES input
 	input := &ses.SendEmailInput{
 		Source: aws.String(s.from),
@@ -82,4 +95,9 @@ func (s *SESSender) Send(ctx context.Context, notif *db.Notification) error {
 	)
 
 	return nil
+}
+
+// SupportsChannel checks if this sender supports the email channel
+func (s *SESSender) SupportsChannel(channel string) bool {
+	return channel == db.ChannelEmail
 }
