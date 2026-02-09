@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lalithlochan/nimbus/internal/api"
+	"github.com/lalithlochan/nimbus/internal/circuitbreaker"
 	"github.com/lalithlochan/nimbus/internal/config"
 	"github.com/lalithlochan/nimbus/internal/db"
 	"github.com/lalithlochan/nimbus/internal/metrics"
@@ -147,13 +149,40 @@ func run() error {
 		DefaultTimeout: time.Duration(cfg.WebhookTimeout) * time.Second,
 	})
 
+	// Wrap each sender with a circuit breaker for resilience.
+	// When a downstream service (SES/SNS/webhook) starts failing,
+	// the circuit opens and fails fast instead of hammering a dead service.
+	sesBreaker := circuitbreaker.New(circuitbreaker.Config{
+		Name:            "ses-email",
+		MaxFailures:     5,
+		RecoveryTimeout: 30 * time.Second,
+	}, logger)
+	protectedEmail := circuitbreaker.NewProtectedSender(sender, sesBreaker, logger)
+
+	var protectedSNS circuitbreaker.Sender
+	var snsBreaker *circuitbreaker.CircuitBreaker
+	if snsSender != nil {
+		snsBreaker = circuitbreaker.New(circuitbreaker.Config{
+			Name:            "sns-sms",
+			MaxFailures:     5,
+			RecoveryTimeout: 30 * time.Second,
+		}, logger)
+		protectedSNS = circuitbreaker.NewProtectedSender(snsSender, snsBreaker, logger)
+	}
+
+	webhookBreaker := circuitbreaker.New(circuitbreaker.Config{
+		Name:            "webhook",
+		MaxFailures:     5,
+		RecoveryTimeout: 30 * time.Second,
+	}, logger)
+	protectedWebhook := circuitbreaker.NewProtectedSender(webhookSender, webhookBreaker, logger)
+
 	// Create multi-sender that routes to appropriate channel handler
 	var multiSender worker.Sender
-	if snsSender != nil {
-		multiSender = worker.NewMultiSender(logger, sender, snsSender, webhookSender)
+	if protectedSNS != nil {
+		multiSender = worker.NewMultiSender(logger, protectedEmail, protectedSNS, protectedWebhook)
 	} else {
-		// Fall back to email and webhook only if SNS unavailable
-		multiSender = worker.NewMultiSender(logger, sender, webhookSender)
+		multiSender = worker.NewMultiSender(logger, protectedEmail, protectedWebhook)
 	}
 
 	logger.Info("initialized multi-channel notification system",
@@ -232,6 +261,42 @@ func run() error {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
+	})
+
+	// Circuit breaker status endpoint — shows real-time health of all downstream services
+	breakers := []*circuitbreaker.CircuitBreaker{sesBreaker, webhookBreaker}
+	if snsBreaker != nil {
+		breakers = append(breakers, snsBreaker)
+	}
+	r.Get("/v1/health/circuits", func(w http.ResponseWriter, r *http.Request) {
+		stats := make([]circuitbreaker.Stats, 0, len(breakers))
+		for _, b := range breakers {
+			stats = append(stats, b.Stats())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"circuit_breakers": stats,
+		})
+	})
+
+	// Admin endpoint to reset a circuit breaker
+	r.Post("/v1/admin/circuits/{name}/reset", func(w http.ResponseWriter, r *http.Request) {
+		name := chi.URLParam(r, "name")
+		for _, b := range breakers {
+			if b.Stats().Name == name {
+				b.Reset()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"status":  "reset",
+					"breaker": name,
+				})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "circuit breaker not found: " + name,
+		})
 	})
 
 	// Prometheus metrics endpoint
