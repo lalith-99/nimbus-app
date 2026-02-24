@@ -44,6 +44,11 @@ type Config struct {
 
 	// Webhook config
 	WebhookTimeout int // Timeout for webhook requests in seconds
+
+	// AI / OpenAI config
+	AIEnabled    bool   // Enable AI features (compose endpoint + content enrichment)
+	OpenAIAPIKey string // OpenAI API key
+	OpenAIModel  string // Model to use (default: gpt-4o-mini)
 }
 
 // Load reads configuration from environment variables with sensible defaults
@@ -209,6 +214,17 @@ func Load() (*Config, error) {
 		cfg.WebhookTimeout = t
 	} else {
 		cfg.WebhookTimeout = 30 // default 30 seconds
+	}
+
+	// AI config
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		cfg.OpenAIAPIKey = key
+		cfg.AIEnabled = true
+	}
+	if model := os.Getenv("OPENAI_MODEL"); model != "" {
+		cfg.OpenAIModel = model
+	} else {
+		cfg.OpenAIModel = "gpt-4o-mini"
 	}
 
 	return cfg, nil

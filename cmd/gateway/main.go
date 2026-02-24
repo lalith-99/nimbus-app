@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/lalithlochan/nimbus/internal/ai"
 	"github.com/lalithlochan/nimbus/internal/api"
 	"github.com/lalithlochan/nimbus/internal/circuitbreaker"
 	"github.com/lalithlochan/nimbus/internal/config"
@@ -191,6 +192,31 @@ func run() error {
 		zap.Bool("webhook_enabled", true),
 	)
 
+	// Initialize AI client (optional — only if OPENAI_API_KEY is set)
+	var aiClient *ai.Client
+	var aiHandler *ai.Handler
+	if cfg.AIEnabled {
+		var aiErr error
+		aiClient, aiErr = ai.NewClient(ai.Config{
+			APIKey: cfg.OpenAIAPIKey,
+			Model:  cfg.OpenAIModel,
+		}, logger)
+		if aiErr != nil {
+			logger.Warn("AI features disabled", zap.Error(aiErr))
+		} else {
+			composeService := ai.NewComposeService(aiClient, repo, logger)
+			aiHandler = ai.NewHandler(composeService, logger)
+
+			// Wrap the multi-sender with AI enrichment so template-based
+			// notifications get AI-generated content before sending.
+			multiSender = ai.NewEnrichmentSender(multiSender, aiClient, logger)
+
+			logger.Info("AI features enabled",
+				zap.String("model", cfg.OpenAIModel),
+			)
+		}
+	}
+
 	w := worker.New(repo, multiSender, worker.Config{
 		PollInterval: 5 * time.Second,
 		BatchSize:    10,
@@ -255,6 +281,11 @@ func run() error {
 		r.Get("/dlq/{id}", handler.GetDeadLetterItem)
 		r.Post("/dlq/{id}/retry", handler.RetryDeadLetterItem)
 		r.Post("/dlq/{id}/discard", handler.DiscardDeadLetterItem)
+
+		// AI-powered compose endpoint (only if AI is enabled)
+		if aiHandler != nil {
+			r.Post("/ai/compose", aiHandler.HandleCompose)
+		}
 	})
 
 	// Health check
