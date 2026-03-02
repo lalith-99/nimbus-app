@@ -45,30 +45,30 @@ clean: ## Clean build artifacts
 # Docker targets
 docker-build: ## Build Docker image
 	docker build -t $(REPOSITORY):$(IMAGE_TAG) .
-	@echo "✅ Docker image built: $(REPOSITORY):$(IMAGE_TAG)"
+	@echo "Docker image built: $(REPOSITORY):$(IMAGE_TAG)"
 
 docker-push: docker-build ## Push Docker image to registry
 	@if [ -z "$(REGISTRY)" ]; then \
-		echo "❌ REGISTRY not set. Usage: make docker-push REGISTRY=your-registry"; \
+		echo "Error: REGISTRY not set. Usage: make docker-push REGISTRY=your-registry"; \
 		exit 1; \
 	fi
 	docker tag $(REPOSITORY):$(IMAGE_TAG) $(REGISTRY)/$(REPOSITORY):$(IMAGE_TAG)
 	docker push $(REGISTRY)/$(REPOSITORY):$(IMAGE_TAG)
 	docker tag $(REPOSITORY):$(IMAGE_TAG) $(REGISTRY)/$(REPOSITORY):latest
 	docker push $(REGISTRY)/$(REPOSITORY):latest
-	@echo "✅ Image pushed to $(REGISTRY)/$(REPOSITORY)"
+	@echo "Image pushed to $(REGISTRY)/$(REPOSITORY)"
 
 # CI automation
 ci-local: deps lint test build ## Run full CI pipeline locally
-	@echo "✅ Local CI pipeline passed"
+	@echo "Local CI pipeline passed"
 
 ci-docker: ci-local docker-build ## Run CI + Docker build locally
-	@echo "✅ CI + Docker pipeline complete"
+	@echo "CI + Docker pipeline complete"
 
 validate: ## Validate project structure and dependencies
-	@echo "🔍 Validating project..."
+	@echo "Validating project..."
 	@go mod verify
 	@go vet ./...
-	@echo "✅ Project validation passed"
+	@echo "Project validation passed"
 
 all: validate ci-local ## Run full validation and CI

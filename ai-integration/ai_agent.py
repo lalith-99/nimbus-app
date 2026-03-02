@@ -297,7 +297,7 @@ def run_agent(user_request: str, max_iterations: int = 5) -> str:
             func_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
             
-            print(f"\n🔧 Calling: {func_name}")
+            print(f"\nCalling: {func_name}")
             print(f"   Args: {json.dumps(arguments, indent=2)}")
             
             result = execute_function(func_name, arguments)
@@ -341,7 +341,7 @@ def main():
     global NIMBUS_BASE_URL
     NIMBUS_BASE_URL = args.nimbus_url
     
-    print(f"🚀 Nimbus Integration Demo")
+    print(f"Nimbus Integration Demo")
     print(f"   Nimbus URL: {NIMBUS_BASE_URL}")
     print(f"   Request: {args.request}\n")
     
@@ -349,10 +349,10 @@ def main():
     try:
         resp = requests.get(f"{NIMBUS_BASE_URL}/health", timeout=2)
         if resp.status_code != 200:
-            print("⚠️  Warning: Nimbus health check failed. Is it running?")
+            print("Warning: Nimbus health check failed. Is it running?")
             print(f"   Start with: cd ~/workspace/nimbus && go run cmd/gateway/main.go\n")
     except requests.RequestException:
-        print("❌ Nimbus is not running!")
+        print("Error: Nimbus is not running!")
         print(f"   Start with: cd ~/workspace/nimbus && go run cmd/gateway/main.go")
         print(f"   Then retry this script.\n")
         return
@@ -360,7 +360,7 @@ def main():
     final_response = run_agent(args.request)
     
     print("\n" + "=" * 60)
-    print("✅ Final Response:")
+    print("Final Response:")
     print(final_response)
     print("=" * 60)
 

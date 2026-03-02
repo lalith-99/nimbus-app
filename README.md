@@ -58,7 +58,7 @@ curl "http://localhost:8080/v1/notifications?tenant_id=00000000-0000-0000-0000-0
 
 ## Features
 
-- ** AI-Powered Interface**: Natural language control via GPT-4 function calling
+- **AI-Powered Interface**: Natural language control via GPT-4 function calling
 - Complete CRUD API (create, get, list, update status)
 - **Production Email Delivery**: AWS SES integration with retry logic
 - PostgreSQL with connection pooling
@@ -96,7 +96,7 @@ nimbus/
 │   ├── db/              # Database layer (Repository pattern)
 │   ├── config/          # Configuration management
 │   └── observ/          # Observability (logging)
-├── ai-integration/      #  AI orchestration layer (Python)
+├── ai-integration/      # AI orchestration layer (Python)
 ├── migrations/          # Database migrations
 ├── docs/               # Documentation
 └── postman/            # Postman collection for testing
