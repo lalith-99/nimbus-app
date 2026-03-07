@@ -152,8 +152,10 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	// This prevents duplicate notifications with identical content
 	if idempotencyKey == "" && h.idempotency != nil {
 		idempotencyKey = generateContentHash(req)
-		h.logger.Debug("auto-generated idempotency key from content",
+		h.logger.Debug("auto-generated idempotency key",
 			zap.String("idempotency_key", idempotencyKey),
+			zap.String("tenant_id", req.TenantID),
+			zap.String("channel", req.Channel),
 		)
 	}
 
@@ -168,8 +170,9 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 					"Another request with this idempotency key is in progress")
 				return
 			}
-			h.logger.Warn("idempotency check failed, proceeding",
+			h.logger.Warn("idempotency check failed",
 				zap.Error(err),
+				zap.String("tenant_id", req.TenantID),
 				zap.String("idempotency_key", idempotencyKey),
 			)
 		} else if cachedResult != nil {

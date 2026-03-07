@@ -24,6 +24,7 @@ type SESConfig struct {
 	FromEmail string
 }
 
+// NewSESSender creates an SES-backed email sender.
 func NewSESSender(ctx context.Context, cfg SESConfig, logger *zap.Logger) (*SESSender, error) {
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.Region))
@@ -88,10 +89,11 @@ func (s *SESSender) Send(ctx context.Context, notif *db.Notification) error {
 		return fmt.Errorf("ses send failed: %w", err)
 	}
 
-	s.logger.Info("email sent via SES",
-		zap.String("id", notif.ID.String()),
+	s.logger.Info("sent email via ses",
+		zap.String("notification_id", notif.ID.String()),
+		zap.String("channel", notif.Channel),
 		zap.String("to", payload.To),
-		zap.String("message_id", *result.MessageId),
+		zap.String("message_id", aws.ToString(result.MessageId)),
 	)
 
 	return nil

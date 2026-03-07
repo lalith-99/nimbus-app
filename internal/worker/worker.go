@@ -29,6 +29,7 @@ type Config struct {
 	MaxRetries   int
 }
 
+// New creates a worker with default config values.
 func New(repo Repository, sender Sender, cfg Config, logger *zap.Logger) *Worker {
 
 	if cfg.PollInterval == 0 {
@@ -59,7 +60,9 @@ func (w *Worker) Start(ctx context.Context) {
 			w.logger.Info("worker stopping")
 			return
 		case <-ticker.C:
-			w.logger.Info("checking for notifications")
+			w.logger.Debug("checking for notifications",
+				zap.Int("batch_size", w.config.BatchSize),
+			)
 			w.processBatch(ctx)
 		}
 	}
@@ -92,7 +95,8 @@ func (w *Worker) processNotification(ctx context.Context, notif *db.Notification
 	if err != nil {
 		w.logger.Error("failed to send notification",
 			zap.Error(err),
-			zap.String("id", notif.ID.String()),
+			zap.String("notification_id", notif.ID.String()),
+			zap.String("channel", notif.Channel),
 			zap.Int("attempt", newAttempt),
 		)
 

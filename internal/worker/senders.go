@@ -84,13 +84,14 @@ type LogSender struct {
 	logger *zap.Logger
 }
 
+// NewLogSender creates a sender that logs notifications.
 func NewLogSender(logger *zap.Logger) *LogSender {
 	return &LogSender{logger: logger}
 }
 
 func (s *LogSender) Send(ctx context.Context, notif *db.Notification) error {
-	s.logger.Info("logging notification (development mode)",
-		zap.String("id", notif.ID.String()),
+	s.logger.Debug("logging notification",
+		zap.String("notification_id", notif.ID.String()),
 		zap.String("channel", notif.Channel),
 		zap.String("user_id", notif.UserID.String()),
 		zap.Any("payload", json.RawMessage(notif.Payload)),
