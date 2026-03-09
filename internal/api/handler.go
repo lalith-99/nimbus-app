@@ -19,7 +19,7 @@ import (
 	"github.com/lalithlochan/nimbus/internal/sqs"
 )
 
-// NotificationRepository defines the interface for notification database operations
+// NotificationRepository defines notification database operations.
 type NotificationRepository interface {
 	CreateNotification(ctx context.Context, notif *db.Notification) error
 	GetNotification(ctx context.Context, id uuid.UUID) (*db.Notification, error)
@@ -32,7 +32,7 @@ type NotificationRepository interface {
 	DiscardDeadLetter(ctx context.Context, id uuid.UUID) error
 }
 
-// NotificationRequest represents the incoming request body
+// NotificationRequest represents the incoming request body.
 type NotificationRequest struct {
 	TenantID string          `json:"tenant_id"`
 	UserID   string          `json:"user_id"`
@@ -40,12 +40,12 @@ type NotificationRequest struct {
 	Payload  json.RawMessage `json:"payload"`
 }
 
-// NotificationResponse is returned after creating a notification
+// NotificationResponse is returned after creating a notification.
 type NotificationResponse struct {
 	ID string `json:"id"`
 }
 
-// ErrorResponse represents an error in problem+json format
+// ErrorResponse represents an error in problem+json format.
 type ErrorResponse struct {
 	Type   string `json:"type"`
 	Title  string `json:"title"`
@@ -53,7 +53,7 @@ type ErrorResponse struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// Handler holds dependencies for API handlers
+// Handler holds dependencies for API handlers.
 type Handler struct {
 	repo        NotificationRepository    // 16 bytes (interface = 2 pointers)
 	idempotency *redis.IdempotencyService // 8 bytes
@@ -61,7 +61,7 @@ type Handler struct {
 	logger      *zap.Logger               // 8 bytes
 }
 
-// NewHandler creates a new API handler
+// NewHandler creates a new API handler.
 func NewHandler(logger *zap.Logger, repo NotificationRepository) *Handler {
 	return &Handler{
 		logger:      logger,
@@ -71,7 +71,7 @@ func NewHandler(logger *zap.Logger, repo NotificationRepository) *Handler {
 	}
 }
 
-// NewHandlerWithIdempotency creates a handler with idempotency support
+// NewHandlerWithIdempotency creates a handler with idempotency support.
 func NewHandlerWithIdempotency(logger *zap.Logger, repo NotificationRepository, idempotency *redis.IdempotencyService) *Handler {
 	return &Handler{
 		logger:      logger,
@@ -81,7 +81,7 @@ func NewHandlerWithIdempotency(logger *zap.Logger, repo NotificationRepository, 
 	}
 }
 
-// NewHandlerWithSQS creates a handler with SQS producer support
+// NewHandlerWithSQS creates a handler with SQS producer support.
 func NewHandlerWithSQS(logger *zap.Logger, repo NotificationRepository, idempotency *redis.IdempotencyService, producer *sqs.Producer) *Handler {
 	return &Handler{
 		logger:      logger,
@@ -129,8 +129,8 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate payload is valid JSON
-	if !json.Valid(req.Payload) {
+	// Validate payload is valid JSON when provided
+	if len(req.Payload) > 0 && !json.Valid(req.Payload) {
 		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid payload", "payload must be valid JSON")
 		return
 	}
@@ -219,8 +219,6 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			NotificationID: notif.ID.String(),
 			StatusCode:     http.StatusCreated,
 		}
-		// Client-provided keys: 24h TTL (Stripe-style explicit dedup control)
-		// Auto-generated keys: 5min TTL (catch retries, allow intentional re-sends)
 		ttl := redis.IdempotencyTTL
 		if clientProvidedKey {
 			ttl = redis.IdempotencyTTLExact
