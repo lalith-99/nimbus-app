@@ -19,6 +19,13 @@ import (
 	"github.com/lalithlochan/nimbus/internal/sqs"
 )
 
+const (
+	autoIdempotencyPrefix = "auto:"
+	contentHashBytes      = 16
+	headerIdempotencyKey  = "Idempotency-Key"
+	headerReplay          = "X-Idempotency-Replayed"
+)
+
 // NotificationRepository defines notification database operations.
 type NotificationRepository interface {
 	CreateNotification(ctx context.Context, notif *db.Notification) error
@@ -95,10 +102,9 @@ func NewHandlerWithSQS(logger *zap.Logger, repo NotificationRepository, idempote
 // This enables automatic deduplication - identical requests within the TTL window
 // will return the same notification ID instead of creating duplicates.
 func generateContentHash(req NotificationRequest) string {
-	// Combine all fields that define uniqueness
 	content := req.TenantID + "|" + req.UserID + "|" + req.Channel + "|" + string(req.Payload)
 	hash := sha256.Sum256([]byte(content))
-	return "auto:" + hex.EncodeToString(hash[:16]) // Use first 16 bytes (32 hex chars)
+	return autoIdempotencyPrefix + hex.EncodeToString(hash[:contentHashBytes])
 }
 
 // CreateNotification handles POST /v1/notifications
@@ -106,8 +112,7 @@ func generateContentHash(req NotificationRequest) string {
 func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Extract Idempotency-Key header (optional - will auto-generate from content if not provided)
-	idempotencyKey := r.Header.Get("Idempotency-Key")
+	idempotencyKey := r.Header.Get(headerIdempotencyKey)
 	clientProvidedKey := idempotencyKey != "" // Track if client explicitly set the key
 
 	var req NotificationRequest
@@ -178,7 +183,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		} else if cachedResult != nil {
 			resp := NotificationResponse{ID: cachedResult.NotificationID}
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Idempotency-Replayed", "true")
+			w.Header().Set(headerReplay, "true")
 			w.WriteHeader(cachedResult.StatusCode)
 			_ = json.NewEncoder(w).Encode(resp)
 			return
