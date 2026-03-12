@@ -24,6 +24,13 @@ const (
 	contentHashBytes      = 16
 	headerIdempotencyKey  = "Idempotency-Key"
 	headerReplay          = "X-Idempotency-Replayed"
+	contentTypeJSON       = "application/json"
+)
+
+const (
+	errTypeInvalidRequest = "invalid_request"
+	errDetailInvalidChannel = "channel must be email, sms, or webhook"
+	errDetailInvalidPayload = "payload must be valid JSON"
 )
 
 // NotificationRepository defines notification database operations.
@@ -130,13 +137,13 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
 	// Validate channel
 	if req.Channel != db.ChannelEmail && req.Channel != db.ChannelSMS && req.Channel != db.ChannelWebhook {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid channel", "channel must be email, sms, or webhook")
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "Invalid channel", errDetailInvalidChannel)
 		return
 	}
 
 	// Validate payload is valid JSON when provided
 	if len(req.Payload) > 0 && !json.Valid(req.Payload) {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid payload", "payload must be valid JSON")
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "Invalid payload", errDetailInvalidPayload)
 		return
 	}
 
@@ -182,7 +189,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			)
 		} else if cachedResult != nil {
 			resp := NotificationResponse{ID: cachedResult.NotificationID}
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", contentTypeJSON)
 			w.Header().Set(headerReplay, "true")
 			w.WriteHeader(cachedResult.StatusCode)
 			_ = json.NewEncoder(w).Encode(resp)
