@@ -25,10 +25,13 @@ const (
 	headerIdempotencyKey  = "Idempotency-Key"
 	headerReplay          = "X-Idempotency-Replayed"
 	contentTypeJSON       = "application/json"
+	replayHeaderValue     = "true"
 )
 
 const (
-	errTypeInvalidRequest = "invalid_request"
+	errTypeInvalidRequest   = "invalid_request"
+	errTitleInvalidChannel  = "Invalid channel"
+	errTitleInvalidPayload  = "Invalid payload"
 	errDetailInvalidChannel = "channel must be email, sms, or webhook"
 	errDetailInvalidPayload = "payload must be valid JSON"
 )
@@ -137,13 +140,13 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
 	// Validate channel
 	if req.Channel != db.ChannelEmail && req.Channel != db.ChannelSMS && req.Channel != db.ChannelWebhook {
-		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "Invalid channel", errDetailInvalidChannel)
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidChannel, errDetailInvalidChannel)
 		return
 	}
 
 	// Validate payload is valid JSON when provided
 	if len(req.Payload) > 0 && !json.Valid(req.Payload) {
-		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, "Invalid payload", errDetailInvalidPayload)
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidPayload, errDetailInvalidPayload)
 		return
 	}
 
