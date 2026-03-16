@@ -42,8 +42,7 @@ type NotificationRepository interface {
 	GetNotification(ctx context.Context, id uuid.UUID) (*db.Notification, error)
 	ListNotificationsByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.Notification, error)
 	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
-	// DLQ methods
-	ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.DeadLetterNotification, error)
+		ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.DeadLetterNotification, error)
 	GetDeadLetter(ctx context.Context, id uuid.UUID) (*db.DeadLetterNotification, error)
 	RetryDeadLetter(ctx context.Context, id uuid.UUID) (*db.Notification, error)
 	DiscardDeadLetter(ctx context.Context, id uuid.UUID) error
@@ -109,21 +108,19 @@ func NewHandlerWithSQS(logger *zap.Logger, repo NotificationRepository, idempote
 }
 
 // generateContentHash creates a SHA256 hash from the notification request content.
-// This enables automatic deduplication - identical requests within the TTL window
-// will return the same notification ID instead of creating duplicates.
 func generateContentHash(req NotificationRequest) string {
 	content := req.TenantID + "|" + req.UserID + "|" + req.Channel + "|" + string(req.Payload)
 	hash := sha256.Sum256([]byte(content))
 	return autoIdempotencyPrefix + hex.EncodeToString(hash[:contentHashBytes])
 }
 
-// CreateNotification handles POST /v1/notifications
+// CreateNotification handles POST /v1/notifications.
 // Supports idempotency via the Idempotency-Key header or automatic content-based deduplication.
 func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	idempotencyKey := r.Header.Get(headerIdempotencyKey)
-	clientProvidedKey := idempotencyKey != "" // Track if client explicitly set the key
+	clientProvidedKey := idempotencyKey != ""
 
 	var req NotificationRequest
 
@@ -144,14 +141,12 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate payload is valid JSON when provided
-	if len(req.Payload) > 0 && !json.Valid(req.Payload) {
+		if len(req.Payload) > 0 && !json.Valid(req.Payload) {
 		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidPayload, errDetailInvalidPayload)
 		return
 	}
 
-	// Parse tenant and user IDs
-	tenantID, err := uuid.Parse(req.TenantID)
+		tenantID, err := uuid.Parse(req.TenantID)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid tenant_id", "tenant_id must be a valid UUID")
 		return
@@ -177,12 +172,11 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	// Check idempotency
 	if idempotencyKey != "" && h.idempotency != nil {
 		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
-
 		if err != nil {
 			if errors.Is(err, redis.ErrDuplicateRequest) {
-				h.writeError(w, http.StatusConflict, "duplicate_request",
+					h.writeError(w, http.StatusConflict, "duplicate_request",
 					"Request is already being processed",
-					"Another request with this idempotency key is in progress")
+					"another request with this idempotency key is in progress")
 				return
 			}
 			h.logger.Warn("idempotency check failed",
@@ -193,7 +187,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		} else if cachedResult != nil {
 			resp := NotificationResponse{ID: cachedResult.NotificationID}
 			w.Header().Set("Content-Type", contentTypeJSON)
-			w.Header().Set(headerReplay, "true")
+			w.Header().Set(headerReplay, replayHeaderValue)
 			w.WriteHeader(cachedResult.StatusCode)
 			_ = json.NewEncoder(w).Encode(resp)
 			return
@@ -211,8 +205,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		Attempt:  0,
 	}
 
-	// Save to database
-	if err := h.repo.CreateNotification(ctx, notif); err != nil {
+		if err := h.repo.CreateNotification(ctx, notif); err != nil {
 		h.logger.Error("failed to create notification",
 			zap.Error(err),
 			zap.String("tenant_id", req.TenantID),
@@ -228,8 +221,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		zap.String("channel", req.Channel),
 	)
 
-	// Store idempotency result
-	if idempotencyKey != "" && h.idempotency != nil {
+		if idempotencyKey != "" && h.idempotency != nil {
 		result := &redis.IdempotencyResult{
 			NotificationID: notif.ID.String(),
 			StatusCode:     http.StatusCreated,
