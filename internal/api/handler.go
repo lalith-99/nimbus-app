@@ -22,25 +22,38 @@ import (
 const (
 	autoIdempotencyPrefix = "auto:"
 	contentHashBytes      = 16
-	headerIdempotencyKey  = "Idempotency-Key"
-	headerReplay          = "X-Idempotency-Replayed"
 	contentTypeJSON       = "application/json"
-	replayHeaderValue     = "true"
 )
 
 const (
-	errTypeInvalidRequest    = "invalid_request"
-	errTypeDuplicateRequest  = "duplicate_request"
-	errTypeDatabaseError     = "database_error"
-	errTitleInvalidChannel   = "Invalid channel"
-	errTitleInvalidPayload   = "Invalid payload"
-	errTitleMalformedJSON    = "Malformed JSON body"
-	errTitleMissingFields    = "Missing required fields"
-	errTitleCreateFailed     = "Failed to create notification"
+	headerIdempotencyKey = "Idempotency-Key"
+	headerReplay         = "X-Idempotency-Replayed"
+	replayHeaderValue    = "true"
+)
+
+const (
+	errTypeInvalidRequest   = "invalid_request"
+	errTypeDuplicateRequest = "duplicate_request"
+	errTypeDatabaseError    = "database_error"
+)
+
+const (
+	errTitleInvalidChannel = "Invalid channel"
+	errTitleInvalidPayload = "Invalid payload"
+	errTitleMalformedJSON  = "Malformed JSON body"
+	errTitleMissingFields  = "Missing required fields"
+	errTitleCreateFailed   = "Failed to create notification"
+	errTitleInvalidTenant  = "Invalid tenant_id"
+	errTitleInvalidUser    = "Invalid user_id"
+)
+
+const (
 	errDetailInvalidChannel  = "channel must be email, sms, or webhook"
 	errDetailInvalidPayload  = "payload must be valid JSON"
 	errDetailMissingFields   = "tenant_id, user_id, and channel are required"
 	errDetailRequestInFlight = "another request with this idempotency key is in progress"
+	errDetailInvalidTenant   = "tenant_id must be a valid UUID"
+	errDetailInvalidUser     = "user_id must be a valid UUID"
 )
 
 // NotificationRepository defines notification database operations.
@@ -155,13 +168,13 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
 		tenantID, err := uuid.Parse(req.TenantID)
 	if err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid tenant_id", "tenant_id must be a valid UUID")
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidTenant, errDetailInvalidTenant)
 		return
 	}
 
 	userID, err := uuid.Parse(req.UserID)
 	if err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "Invalid user_id", "user_id must be a valid UUID")
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidUser, errDetailInvalidUser)
 		return
 	}
 
