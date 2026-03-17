@@ -29,11 +29,18 @@ const (
 )
 
 const (
-	errTypeInvalidRequest   = "invalid_request"
-	errTitleInvalidChannel  = "Invalid channel"
-	errTitleInvalidPayload  = "Invalid payload"
-	errDetailInvalidChannel = "channel must be email, sms, or webhook"
-	errDetailInvalidPayload = "payload must be valid JSON"
+	errTypeInvalidRequest    = "invalid_request"
+	errTypeDuplicateRequest  = "duplicate_request"
+	errTypeDatabaseError     = "database_error"
+	errTitleInvalidChannel   = "Invalid channel"
+	errTitleInvalidPayload   = "Invalid payload"
+	errTitleMalformedJSON    = "Malformed JSON body"
+	errTitleMissingFields    = "Missing required fields"
+	errTitleCreateFailed     = "Failed to create notification"
+	errDetailInvalidChannel  = "channel must be email, sms, or webhook"
+	errDetailInvalidPayload  = "payload must be valid JSON"
+	errDetailMissingFields   = "tenant_id, user_id, and channel are required"
+	errDetailRequestInFlight = "another request with this idempotency key is in progress"
 )
 
 // NotificationRepository defines notification database operations.
@@ -125,13 +132,13 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	var req NotificationRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "Malformed JSON body", err.Error())
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleMalformedJSON, err.Error())
 		return
 	}
 
 	// Validate required fields
 	if req.TenantID == "" || req.UserID == "" || req.Channel == "" {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "Missing required fields", "tenant_id, user_id, and channel are required")
+		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleMissingFields, errDetailMissingFields)
 		return
 	}
 
@@ -174,9 +181,9 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
 		if err != nil {
 			if errors.Is(err, redis.ErrDuplicateRequest) {
-					h.writeError(w, http.StatusConflict, "duplicate_request",
+					h.writeError(w, http.StatusConflict, errTypeDuplicateRequest,
 					"Request is already being processed",
-					"another request with this idempotency key is in progress")
+					errDetailRequestInFlight)
 				return
 			}
 			h.logger.Warn("idempotency check failed",
@@ -211,7 +218,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			zap.String("tenant_id", req.TenantID),
 			zap.String("channel", req.Channel),
 		)
-		h.writeError(w, http.StatusInternalServerError, "database_error", "Failed to create notification", "")
+		h.writeError(w, http.StatusInternalServerError, errTypeDatabaseError, errTitleCreateFailed, "")
 		return
 	}
 
