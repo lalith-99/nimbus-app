@@ -28,6 +28,7 @@ const (
 const (
 	headerIdempotencyKey = "Idempotency-Key"
 	headerReplay         = "X-Idempotency-Replayed"
+	headerContentType    = "Content-Type"
 	replayHeaderValue    = "true"
 )
 
@@ -38,13 +39,14 @@ const (
 )
 
 const (
-	errTitleInvalidChannel = "Invalid channel"
-	errTitleInvalidPayload = "Invalid payload"
-	errTitleMalformedJSON  = "Malformed JSON body"
-	errTitleMissingFields  = "Missing required fields"
-	errTitleCreateFailed   = "Failed to create notification"
-	errTitleInvalidTenant  = "Invalid tenant_id"
-	errTitleInvalidUser    = "Invalid user_id"
+	errTitleInvalidChannel   = "Invalid channel"
+	errTitleInvalidPayload   = "Invalid payload"
+	errTitleMalformedJSON    = "Malformed JSON body"
+	errTitleMissingFields    = "Missing required fields"
+	errTitleCreateFailed     = "Failed to create notification"
+	errTitleInvalidTenant    = "Invalid tenant_id"
+	errTitleInvalidUser      = "Invalid user_id"
+	errTitleRequestInFlight  = "Request is already being processed"
 )
 
 const (
@@ -195,7 +197,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, redis.ErrDuplicateRequest) {
 					h.writeError(w, http.StatusConflict, errTypeDuplicateRequest,
-					"Request is already being processed",
+					errTitleRequestInFlight,
 					errDetailRequestInFlight)
 				return
 			}
@@ -206,7 +208,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			)
 		} else if cachedResult != nil {
 			resp := NotificationResponse{ID: cachedResult.NotificationID}
-			w.Header().Set("Content-Type", contentTypeJSON)
+			w.Header().Set(headerContentType, contentTypeJSON)
 			w.Header().Set(headerReplay, replayHeaderValue)
 			w.WriteHeader(cachedResult.StatusCode)
 			_ = json.NewEncoder(w).Encode(resp)
