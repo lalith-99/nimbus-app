@@ -23,6 +23,7 @@ const (
 	autoIdempotencyPrefix = "auto:"
 	contentHashBytes      = 16
 	contentTypeJSON       = "application/json"
+	contentHashSeparator  = "|"
 )
 
 const (
@@ -36,17 +37,19 @@ const (
 	errTypeInvalidRequest   = "invalid_request"
 	errTypeDuplicateRequest = "duplicate_request"
 	errTypeDatabaseError    = "database_error"
+	errTypeInternalError    = "internal_error"
 )
 
 const (
-	errTitleInvalidChannel   = "Invalid channel"
-	errTitleInvalidPayload   = "Invalid payload"
-	errTitleMalformedJSON    = "Malformed JSON body"
-	errTitleMissingFields    = "Missing required fields"
-	errTitleCreateFailed     = "Failed to create notification"
-	errTitleInvalidTenant    = "Invalid tenant_id"
-	errTitleInvalidUser      = "Invalid user_id"
-	errTitleRequestInFlight  = "Request is already being processed"
+	errTitleInvalidChannel  = "Invalid channel"
+	errTitleInvalidPayload  = "Invalid payload"
+	errTitleMalformedJSON   = "Malformed JSON body"
+	errTitleMissingFields   = "Missing required fields"
+	errTitleCreateFailed    = "Failed to create notification"
+	errTitleInvalidTenant   = "Invalid tenant_id"
+	errTitleInvalidUser     = "Invalid user_id"
+	errTitleRequestInFlight = "Request is already being processed"
+	errTitleInternalError   = "Internal server error"
 )
 
 const (
@@ -131,7 +134,7 @@ func NewHandlerWithSQS(logger *zap.Logger, repo NotificationRepository, idempote
 
 // generateContentHash creates a SHA256 hash from the notification request content.
 func generateContentHash(req NotificationRequest) string {
-	content := req.TenantID + "|" + req.UserID + "|" + req.Channel + "|" + string(req.Payload)
+	content := req.TenantID + contentHashSeparator + req.UserID + contentHashSeparator + req.Channel + contentHashSeparator + string(req.Payload)
 	hash := sha256.Sum256([]byte(content))
 	return autoIdempotencyPrefix + hex.EncodeToString(hash[:contentHashBytes])
 }
