@@ -22,8 +22,12 @@ import (
 const (
 	autoIdempotencyPrefix = "auto:"
 	contentHashBytes      = 16
-	contentTypeJSON       = "application/json"
 	contentHashSeparator  = "|"
+)
+
+const (
+	contentTypeJSON = "application/json"
+	statusPending   = "pending"
 )
 
 const (
@@ -59,6 +63,10 @@ const (
 	errDetailRequestInFlight = "another request with this idempotency key is in progress"
 	errDetailInvalidTenant   = "tenant_id must be a valid UUID"
 	errDetailInvalidUser     = "user_id must be a valid UUID"
+)
+
+const (
+	initialAttempt = 0
 )
 
 // NotificationRepository defines notification database operations.
