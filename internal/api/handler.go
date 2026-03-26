@@ -75,7 +75,7 @@ type NotificationRepository interface {
 	GetNotification(ctx context.Context, id uuid.UUID) (*db.Notification, error)
 	ListNotificationsByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.Notification, error)
 	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
-		ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.DeadLetterNotification, error)
+	ListDeadLetterByTenant(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]*db.DeadLetterNotification, error)
 	GetDeadLetter(ctx context.Context, id uuid.UUID) (*db.DeadLetterNotification, error)
 	RetryDeadLetter(ctx context.Context, id uuid.UUID) (*db.Notification, error)
 	DiscardDeadLetter(ctx context.Context, id uuid.UUID) error
@@ -174,12 +174,12 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-		if len(req.Payload) > 0 && !json.Valid(req.Payload) {
+	if len(req.Payload) > 0 && !json.Valid(req.Payload) {
 		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidPayload, errDetailInvalidPayload)
 		return
 	}
 
-		tenantID, err := uuid.Parse(req.TenantID)
+	tenantID, err := uuid.Parse(req.TenantID)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidTenant, errDetailInvalidTenant)
 		return
@@ -191,8 +191,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-generate idempotency key from content if not provided
-	// This prevents duplicate notifications with identical content
+	// Auto-generate idempotency key from content if not provided.
 	if idempotencyKey == "" && h.idempotency != nil {
 		idempotencyKey = generateContentHash(req)
 		h.logger.Debug("auto-generated idempotency key",
@@ -202,12 +201,12 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Check idempotency
+	// Check idempotency cache and reserve the key.
 	if idempotencyKey != "" && h.idempotency != nil {
 		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
 		if err != nil {
 			if errors.Is(err, redis.ErrDuplicateRequest) {
-					h.writeError(w, http.StatusConflict, errTypeDuplicateRequest,
+				h.writeError(w, http.StatusConflict, errTypeDuplicateRequest,
 					errTitleRequestInFlight,
 					errDetailRequestInFlight)
 				return
