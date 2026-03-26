@@ -27,7 +27,6 @@ const (
 
 const (
 	contentTypeJSON = "application/json"
-	statusPending   = "pending"
 )
 
 const (
@@ -110,6 +109,10 @@ type Handler struct {
 	logger      *zap.Logger               // 8 bytes
 }
 
+func isValidChannel(channel string) bool {
+	return channel == db.ChannelEmail || channel == db.ChannelSMS || channel == db.ChannelWebhook
+}
+
 // NewHandler creates a new API handler.
 func NewHandler(logger *zap.Logger, repo NotificationRepository) *Handler {
 	return &Handler{
@@ -168,8 +171,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate channel
-	if req.Channel != db.ChannelEmail && req.Channel != db.ChannelSMS && req.Channel != db.ChannelWebhook {
+	if !isValidChannel(req.Channel) {
 		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleInvalidChannel, errDetailInvalidChannel)
 		return
 	}
@@ -191,7 +193,6 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-generate idempotency key from content if not provided.
 	if idempotencyKey == "" && h.idempotency != nil {
 		idempotencyKey = generateContentHash(req)
 		h.logger.Debug("auto-generated idempotency key",
@@ -201,7 +202,6 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Check idempotency cache and reserve the key.
 	if idempotencyKey != "" && h.idempotency != nil {
 		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
 		if err != nil {
@@ -234,7 +234,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		Channel:  req.Channel,
 		Payload:  req.Payload,
 		Status:   db.StatusPending,
-		Attempt:  0,
+		Attempt:  initialAttempt,
 	}
 
 		if err := h.repo.CreateNotification(ctx, notif); err != nil {
