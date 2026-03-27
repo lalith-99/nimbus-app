@@ -110,7 +110,12 @@ type Handler struct {
 }
 
 func isValidChannel(channel string) bool {
-	return channel == db.ChannelEmail || channel == db.ChannelSMS || channel == db.ChannelWebhook
+	switch channel {
+	case db.ChannelEmail, db.ChannelSMS, db.ChannelWebhook:
+		return true
+	default:
+		return false
+	}
 }
 
 // NewHandler creates a new API handler.
@@ -151,7 +156,6 @@ func generateContentHash(req NotificationRequest) string {
 }
 
 // CreateNotification handles POST /v1/notifications.
-// Supports idempotency via the Idempotency-Key header or automatic content-based deduplication.
 func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -160,7 +164,9 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
 	var req NotificationRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, errTypeInvalidRequest, errTitleMalformedJSON, err.Error())
 		return
 	}
@@ -226,7 +232,6 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create notification
 	notif := &db.Notification{
 		ID:       uuid.New(),
 		TenantID: tenantID,
@@ -237,7 +242,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		Attempt:  initialAttempt,
 	}
 
-		if err := h.repo.CreateNotification(ctx, notif); err != nil {
+	if err := h.repo.CreateNotification(ctx, notif); err != nil {
 		h.logger.Error("failed to create notification",
 			zap.Error(err),
 			zap.String("tenant_id", req.TenantID),
