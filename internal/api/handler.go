@@ -248,6 +248,17 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			zap.String("tenant_id", req.TenantID),
 			zap.String("channel", req.Channel),
 		)
+		// The request failed AFTER we reserved the idempotency key. Release the
+		// reservation so a retry isn't rejected with 409 for the next 5 minutes.
+		// (Release is a no-op if a result was already stored, so it's safe here.)
+		if idempotencyKey != "" && h.idempotency != nil {
+			if relErr := h.idempotency.Release(ctx, req.TenantID, idempotencyKey); relErr != nil {
+				h.logger.Warn("failed to release idempotency reservation",
+					zap.Error(relErr),
+					zap.String("idempotency_key", idempotencyKey),
+				)
+			}
+		}
 		h.writeError(w, http.StatusInternalServerError, errTypeDatabaseError, errTitleCreateFailed, "")
 		return
 	}
@@ -258,7 +269,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		zap.String("channel", req.Channel),
 	)
 
-		if idempotencyKey != "" && h.idempotency != nil {
+	if idempotencyKey != "" && h.idempotency != nil {
 		result := &redis.IdempotencyResult{
 			NotificationID: notif.ID.String(),
 			StatusCode:     http.StatusCreated,
@@ -275,16 +286,18 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enqueue to SQS for asynchronous processing
+	// Enqueue to SQS for low-latency dispatch. This is BEST-EFFORT: the durable
+	// 'pending' row we just wrote is the source of truth, and the worker delivers
+	// by polling/claiming the DB (transactional outbox pattern). So if SQS is
+	// momentarily unavailable we log and still return 201 — the notification will
+	// be delivered by the DB-poll path. Failing the request here would be wrong:
+	// the client would retry, but the original is already durably queued.
 	if h.producer != nil {
 		if msgID, err := h.producer.Enqueue(ctx, notif); err != nil {
-			h.logger.Error("failed to enqueue notification to sqs",
+			h.logger.Warn("sqs enqueue failed; relying on DB-poll delivery",
 				zap.Error(err),
 				zap.String("notification_id", notif.ID.String()),
 			)
-			// Continue with error response - SQS enqueue failure is not a client error
-			h.writeError(w, http.StatusInternalServerError, "enqueue_error", "Failed to enqueue notification", "")
-			return
 		} else {
 			h.logger.Info("notification enqueued to sqs",
 				zap.String("notification_id", notif.ID.String()),

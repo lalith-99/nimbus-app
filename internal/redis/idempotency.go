@@ -144,3 +144,37 @@ func (s *IdempotencyService) CheckOrReserve(ctx context.Context, tenantID, idemp
 
 	return nil, nil
 }
+
+// releaseScript atomically deletes the key ONLY if it still holds the
+// "processing" marker. We must not delete a key that has already been
+// overwritten with a real stored result — that would let a duplicate request
+// re-execute. Compare-and-delete in a single Lua script makes this race-free
+// (Redis runs the whole script atomically).
+var releaseScript = redis.NewScript(`
+	if redis.call("GET", KEYS[1]) == ARGV[1] then
+		return redis.call("DEL", KEYS[1])
+	end
+	return 0
+`)
+
+// Release frees a reservation made by CheckOrReserve when the request ultimately
+// FAILED (e.g. the DB write errored). Without this, the "processing" marker would
+// linger for the full processingTTL (5 min), and every retry of the failed
+// request would get a 409 Conflict — effectively a 5-minute outage for that key.
+//
+// It is a no-op if the key already holds a stored success result, so it's always
+// safe to call on the error path.
+//
+// Interview talking point:
+// "Reserving an idempotency key is a lock. Any lock you take, you must release on
+//
+//	the failure path — otherwise a transient DB blip poisons that key for the whole
+//	TTL and the client can't retry. I release with a compare-and-delete Lua script
+//	so I never clobber a result that another request legitimately stored."
+func (s *IdempotencyService) Release(ctx context.Context, tenantID, idempotencyKey string) error {
+	key := s.buildKey(tenantID, idempotencyKey)
+	if err := releaseScript.Run(ctx, s.client.rdb, []string{key}, processingMarker).Err(); err != nil {
+		return fmt.Errorf("redis release failed: %w", err)
+	}
+	return nil
+}

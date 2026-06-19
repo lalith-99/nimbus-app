@@ -234,6 +234,104 @@ func (r *Repository) GetPendingNotifications(ctx context.Context, limit int) ([]
 	return notifications, nil
 }
 
+// stuckProcessingTimeout is how long a notification can sit in 'processing'
+// before we assume the worker that claimed it crashed and reclaim the row.
+// It must be comfortably larger than the longest possible single send
+// (SES/SNS/webhook timeout + retries), otherwise we'd reclaim a row that's
+// still being legitimately worked on and double-send it.
+const stuckProcessingTimeout = 5 * time.Minute
+
+// ClaimPendingNotifications atomically claims a batch of notifications for
+// processing. This is the heart of running multiple worker replicas safely.
+//
+// THE PROBLEM IT SOLVES:
+// The naive approach — SELECT pending rows, then UPDATE them to 'processing'
+// in a second statement — has a race window. With N worker replicas polling
+// concurrently, two workers can SELECT the *same* rows before either UPDATEs,
+// and both will send the notification. That breaks our "exactly-once-effect"
+// guarantee and spams users with duplicates.
+//
+// THE FIX:
+// We do the claim in ONE atomic statement using `FOR UPDATE SKIP LOCKED`:
+//
+//		UPDATE ... WHERE id IN (
+//		    SELECT id ... FOR UPDATE SKIP LOCKED
+//		)
+//
+//	  - FOR UPDATE row-locks the selected rows for the duration of the statement.
+//	  - SKIP LOCKED tells Postgres: if a row is already locked by another worker,
+//	    skip it instead of blocking. So each worker gets a DISJOINT set of rows.
+//
+// This is the canonical "queue on top of Postgres" pattern — the same approach
+// used by libraries like Que, GoodJob, and River. No external queue needed for
+// correctness; SQS becomes an optional fan-out, not the source of truth.
+//
+// CRASH RECOVERY:
+// We also reclaim rows stuck in 'processing' longer than stuckProcessingTimeout.
+// If a worker crashes mid-send, its row would otherwise be orphaned forever
+// (the old query only looked at status='pending'). This makes the system
+// self-healing: a crashed worker's in-flight work is picked up by a healthy one.
+//
+// Interview talking point:
+// "The single biggest correctness bug in a multi-replica queue worker is the
+//
+//	SELECT-then-UPDATE race. I close it with FOR UPDATE SKIP LOCKED so each
+//	replica atomically claims a disjoint batch, and I reclaim stuck 'processing'
+//	rows on a timeout so a crashed worker doesn't strand notifications."
+func (r *Repository) ClaimPendingNotifications(ctx context.Context, limit int) ([]*Notification, error) {
+	query := `
+		UPDATE notifications
+		SET status = 'processing', updated_at = NOW()
+		WHERE id IN (
+			SELECT id
+			FROM notifications
+			WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
+			   OR (status = 'processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
+			ORDER BY created_at ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING
+			id, tenant_id, user_id, channel, payload,
+			status, attempt, error_message, next_retry_at,
+			created_at, updated_at
+	`
+
+	// Pass the timeout as an integer number of seconds and multiply by a
+	// 1-second interval. We deliberately avoid Duration.String() ("5m0s")
+	// because Postgres interval parsing treats a bare "m" as MONTHS, not minutes.
+	reclaimSeconds := int(stuckProcessingTimeout.Seconds())
+
+	rows, err := r.db.Pool().Query(ctx, query, limit, reclaimSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("claim pending notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var notifications []*Notification
+	for rows.Next() {
+		var notif Notification
+		if err := rows.Scan(
+			&notif.ID,
+			&notif.TenantID,
+			&notif.UserID,
+			&notif.Channel,
+			&notif.Payload,
+			&notif.Status,
+			&notif.Attempt,
+			&notif.ErrorMessage,
+			&notif.NextRetryAt,
+			&notif.CreatedAt,
+			&notif.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan claimed notification: %w", err)
+		}
+		notifications = append(notifications, &notif)
+	}
+
+	return notifications, rows.Err()
+}
+
 // MoveToDeadLetter moves a failed notification to the dead letter queue
 func (r *Repository) MoveToDeadLetter(ctx context.Context, notif *Notification, lastError string) (*DeadLetterNotification, error) {
 	// Start a transaction

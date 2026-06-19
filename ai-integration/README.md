@@ -136,14 +136,14 @@ User: "Email sent successfully, status: pending"
 - **Production Pattern**: Same approach used by ChatGPT plugins, Copilot agents
 - **Reusable**: Nimbus APIs work with or without AI layer
 
-## Demo for Interviews
+## Demo
 
-**Talking Points:**
+**Highlights:**
 
-1. **LLM Integration**: "I integrated GPT-4 with function calling to orchestrate notification workflows"
-2. **Real Production Stack**: "Uses real AWS SES for email delivery, PostgreSQL for storage"
-3. **Architecture**: "Built as a separate orchestration layer - keeps services decoupled"
-4. **Multi-step**: "LLM can chain multiple API calls to fulfill complex requests"
+1. **LLM Integration**: GPT-4 with function calling orchestrates notification workflows
+2. **Real Production Stack**: Real AWS SES for email delivery, PostgreSQL for storage
+3. **Architecture**: Built as a separate orchestration layer that keeps services decoupled
+4. **Multi-step**: The LLM can chain multiple API calls to fulfill complex requests
 
 **Quick Demo Script:**
 

@@ -11,7 +11,9 @@ import (
 )
 
 type Repository interface {
-	GetPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error)
+	// ClaimPendingNotifications atomically claims a batch (FOR UPDATE SKIP LOCKED),
+	// marking them 'processing' so no other replica can pick the same rows.
+	ClaimPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error)
 	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
 	MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error)
 }
@@ -69,10 +71,12 @@ func (w *Worker) Start(ctx context.Context) {
 }
 
 func (w *Worker) processBatch(ctx context.Context) {
-	// Get pending notifications
-	notifications, err := w.repo.GetPendingNotifications(ctx, w.config.BatchSize)
+	// Atomically claim a batch. Each replica gets a disjoint set of rows
+	// (FOR UPDATE SKIP LOCKED), so we can scale workers horizontally without
+	// double-sending. The claim also reclaims rows stranded by crashed workers.
+	notifications, err := w.repo.ClaimPendingNotifications(ctx, w.config.BatchSize)
 	if err != nil {
-		w.logger.Error("failed to get pending notifications", zap.Error(err))
+		w.logger.Error("failed to claim pending notifications", zap.Error(err))
 		return
 	}
 	if len(notifications) == 0 {
@@ -86,9 +90,8 @@ func (w *Worker) processBatch(ctx context.Context) {
 }
 
 func (w *Worker) processNotification(ctx context.Context, notif *db.Notification) {
-	// Mark as processing first to prevent duplicate picks
-	_ = w.repo.UpdateNotificationStatus(ctx, notif.ID, "processing", notif.Attempt, nil, notif.NextRetryAt)
-
+	// The row was already atomically marked 'processing' by ClaimPendingNotifications,
+	// so we go straight to sending — no extra status write needed here.
 	err := w.sender.Send(ctx, notif)
 	newAttempt := notif.Attempt + 1
 

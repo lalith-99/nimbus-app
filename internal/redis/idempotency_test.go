@@ -141,3 +141,70 @@ func TestIdempotencyService_ReserveThenStore(t *testing.T) {
 		t.Errorf("expected notif-789, got %s", cached.NotificationID)
 	}
 }
+
+// TestIdempotencyService_ReleaseFreesReservation verifies the fix for the
+// reservation-leak bug: after a failed request releases its reservation, a
+// retry must be treated as a brand-new request (not blocked with 409).
+func TestIdempotencyService_ReleaseFreesReservation(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	svc := NewIdempotencyService(client, zap.NewNop())
+	ctx := context.Background()
+
+	// First attempt reserves the key.
+	if _, err := svc.CheckOrReserve(ctx, "tenant-1", "key-1"); err != nil {
+		t.Fatalf("first reserve failed: %v", err)
+	}
+
+	// Simulate the request failing → release the reservation.
+	if err := svc.Release(ctx, "tenant-1", "key-1"); err != nil {
+		t.Fatalf("release failed: %v", err)
+	}
+
+	// A retry must now succeed as a NEW request, not get ErrDuplicateRequest.
+	result, err := svc.CheckOrReserve(ctx, "tenant-1", "key-1")
+	if err != nil {
+		t.Fatalf("retry after release should succeed, got: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("retry after release should be a new request, got cached: %+v", result)
+	}
+}
+
+// TestIdempotencyService_ReleaseDoesNotClobberStoredResult verifies the
+// compare-and-delete safety property: Release must NOT delete a key that already
+// holds a real success result, or a duplicate request could re-execute.
+func TestIdempotencyService_ReleaseDoesNotClobberStoredResult(t *testing.T) {
+	client, cleanup := setupTestRedis(t)
+	defer cleanup()
+
+	svc := NewIdempotencyService(client, zap.NewNop())
+	ctx := context.Background()
+
+	if _, err := svc.CheckOrReserve(ctx, "tenant-1", "key-1"); err != nil {
+		t.Fatalf("reserve failed: %v", err)
+	}
+
+	// Request succeeded and stored its result.
+	if err := svc.Store(ctx, "tenant-1", "key-1", &IdempotencyResult{
+		NotificationID: "notif-keep",
+		StatusCode:     201,
+	}, IdempotencyTTL); err != nil {
+		t.Fatalf("store failed: %v", err)
+	}
+
+	// A late/erroneous Release must be a no-op because the value is no longer
+	// the processing marker — the stored result has to survive.
+	if err := svc.Release(ctx, "tenant-1", "key-1"); err != nil {
+		t.Fatalf("release failed: %v", err)
+	}
+
+	cached, err := svc.Check(ctx, "tenant-1", "key-1")
+	if err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+	if cached == nil || cached.NotificationID != "notif-keep" {
+		t.Fatalf("stored result must survive Release, got: %+v", cached)
+	}
+}

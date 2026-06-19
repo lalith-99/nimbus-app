@@ -49,6 +49,18 @@ type Config struct {
 	AIEnabled    bool   // Enable AI features (compose endpoint + content enrichment)
 	OpenAIAPIKey string // OpenAI API key
 	OpenAIModel  string // Model to use (default: gpt-4o-mini)
+
+	// gRPC server
+	// We run gRPC on a separate port from HTTP because:
+	// 1. HTTP/2 binary framing vs HTTP/1.1 text — mixing on one port adds complexity
+	// 2. Clean separation: external clients use REST (:8080), internal services use gRPC (:9090)
+	// 3. Independent TLS termination per protocol if needed
+	GRPCPort int // Default: 9090
+
+	// gRPC auth tokens: maps Bearer token → tenant_id
+	// In production these would be JWT secrets or fetched from a secrets manager.
+	// For dev/testing, set GRPC_AUTH_TOKENS="token1:tenant-uuid-1,token2:tenant-uuid-2"
+	GRPCAuthTokens map[string]string
 }
 
 // Load reads configuration from environment variables with sensible defaults
@@ -77,8 +89,10 @@ func Load() (*Config, error) {
 		SMTPPort: 587,
 		SMTPFrom: "noreply@nimbus.local",
 
-		AWSRegion:    "us-east-1",
-		SESFromEmail: "noreply@nimbus.local",
+		AWSRegion:      "us-east-1",
+		SESFromEmail:   "noreply@nimbus.local",
+		GRPCPort:       9090,
+		GRPCAuthTokens: map[string]string{},
 	}
 
 	if port := os.Getenv("PORT"); port != "" {
@@ -227,5 +241,43 @@ func Load() (*Config, error) {
 		cfg.OpenAIModel = "gpt-4o-mini"
 	}
 
+	// gRPC config
+	cfg.GRPCPort = 9090
+	if port := os.Getenv("GRPC_PORT"); port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GRPC_PORT: %w", err)
+		}
+		cfg.GRPCPort = p
+	}
+
+	// Parse GRPC_AUTH_TOKENS="token1:tenantUUID1,token2:tenantUUID2"
+	cfg.GRPCAuthTokens = map[string]string{
+		// Default dev token — never use in production
+		"dev-token-nimbus": "00000000-0000-0000-0000-000000000001",
+	}
+	if raw := os.Getenv("GRPC_AUTH_TOKENS"); raw != "" {
+		for _, pair := range splitComma(raw) {
+			parts := splitColon(pair)
+			if len(parts) == 2 {
+				cfg.GRPCAuthTokens[parts[0]] = parts[1]
+			}
+		}
+	}
+
 	return cfg, nil
+}
+
+func splitComma(s string) []string { return splitBy(s, ',') }
+func splitColon(s string) []string { return splitBy(s, ':') }
+func splitBy(s string, sep byte) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
 }

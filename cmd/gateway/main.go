@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,17 +14,21 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
+	googlegrpc "google.golang.org/grpc"
 
 	"github.com/lalithlochan/nimbus/internal/ai"
 	"github.com/lalithlochan/nimbus/internal/api"
 	"github.com/lalithlochan/nimbus/internal/circuitbreaker"
 	"github.com/lalithlochan/nimbus/internal/config"
 	"github.com/lalithlochan/nimbus/internal/db"
+	internalgrpc "github.com/lalithlochan/nimbus/internal/grpc"
 	"github.com/lalithlochan/nimbus/internal/metrics"
 	"github.com/lalithlochan/nimbus/internal/observ"
+	"github.com/lalithlochan/nimbus/internal/rag"
 	"github.com/lalithlochan/nimbus/internal/redis"
 	"github.com/lalithlochan/nimbus/internal/sqs"
 	"github.com/lalithlochan/nimbus/internal/worker"
+	notificationv1 "github.com/lalithlochan/nimbus/proto/notification/v1"
 )
 
 func main() {
@@ -121,7 +126,11 @@ func run() error {
 				zap.Error(err),
 			)
 		}
-		defer producer.Close()
+		// Guard the deferred Close: if NewProducer failed, producer is nil and
+		// calling Close() on it would panic during shutdown.
+		if producer != nil {
+			defer producer.Close()
+		}
 	}
 
 	sesCfg := worker.SESConfig{
@@ -230,6 +239,55 @@ func run() error {
 
 	logger.Info("background worker started")
 
+	// ── gRPC Server ──────────────────────────────────────────────────────────
+	// We start gRPC on a separate port (9090) alongside HTTP (8080).
+	//
+	// Why two ports instead of one?
+	// gRPC uses HTTP/2 with binary framing. Go's net/http mux doesn't natively
+	// multiplex HTTP/1.1 REST and gRPC on the same listener without a CONNECT
+	// tunnel (grpc-gateway). Separate ports = simpler, zero ambiguity.
+	//
+	// Internal services call :9090 (gRPC) for efficiency + server-streaming.
+	// External clients / browsers call :8080 (REST/JSON).
+	grpcServer := googlegrpc.NewServer(
+		// Chain multiple interceptors using grpc.ChainUnaryInterceptor.
+		// Order matters: auth runs first, then any future tracing/logging interceptors.
+		googlegrpc.ChainUnaryInterceptor(
+			internalgrpc.AuthInterceptor(cfg.GRPCAuthTokens, logger),
+		),
+		googlegrpc.ChainStreamInterceptor(
+			internalgrpc.StreamAuthInterceptor(cfg.GRPCAuthTokens, logger),
+		),
+	)
+	notificationv1.RegisterNotificationServiceServer(grpcServer, internalgrpc.NewServer(repo, logger))
+
+	grpcListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.GRPCPort))
+	if err != nil {
+		return fmt.Errorf("failed to create gRPC listener: %w", err)
+	}
+
+	go func() {
+		logger.Info("gRPC server listening",
+			zap.Int("port", cfg.GRPCPort),
+		)
+		if err := grpcServer.Serve(grpcListener); err != nil {
+			logger.Error("gRPC server stopped", zap.Error(err))
+		}
+	}()
+
+	// ── RAG Pipeline (pgvector + hybrid retrieval) ────────────────────────────
+	// Only initialize if OpenAI is enabled (same key used for both compose + RAG).
+	var ragHandler *rag.Handler
+	if cfg.AIEnabled && database != nil {
+		embedder := rag.NewEmbedder(cfg.OpenAIAPIKey)
+		store := rag.NewStore(database.Pool(), logger)
+		reranker := rag.NewReranker()
+		guard := rag.NewGuard()
+		ragPipeline := rag.NewPipeline(embedder, store, reranker, guard, aiClient, logger)
+		ragHandler = rag.NewHandler(ragPipeline, logger)
+		logger.Info("RAG pipeline enabled (pgvector + hybrid search)")
+	}
+
 	// Setup router
 	r := chi.NewRouter()
 
@@ -285,6 +343,12 @@ func run() error {
 		// AI-powered compose endpoint (only if AI is enabled)
 		if aiHandler != nil {
 			r.Post("/ai/compose", aiHandler.HandleCompose)
+		}
+
+		// RAG-powered ask endpoint: hybrid retrieval + cited answers
+		// POST /v1/ai/ask {"query": "...", "tenant_id": "..."}
+		if ragHandler != nil {
+			r.Post("/ai/ask", ragHandler.HandleAsk)
 		}
 	})
 
@@ -360,7 +424,14 @@ func run() error {
 	case sig := <-shutdown:
 		logger.Info("shutdown signal received", zap.String("signal", sig.String()))
 
-		// Give outstanding requests 10 seconds to complete
+		// Gracefully stop the gRPC server first (drains in-flight RPCs).
+		// GracefulStop waits for all active RPCs to complete before closing.
+		// If we have a long-running StreamDeliveryUpdates stream, this gives
+		// it time to finish rather than abruptly cutting the connection.
+		grpcServer.GracefulStop()
+		logger.Info("gRPC server stopped gracefully")
+
+		// Give outstanding HTTP requests 10 seconds to complete
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 

@@ -25,7 +25,7 @@ type updateCall struct {
 	errorMsg *string
 }
 
-func (m *MockRepository) GetPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error) {
+func (m *MockRepository) ClaimPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error) {
 	if m.shouldFail {
 		return nil, errors.New("database error")
 	}
@@ -92,21 +92,19 @@ func TestWorker_ProcessNotification_Success(t *testing.T) {
 		t.Errorf("expected 1 send call, got %d", sender.sendCalls)
 	}
 
-	if len(repo.updateCalls) != 2 {
-		t.Fatalf("expected 2 update calls, got %d", len(repo.updateCalls))
+	// processNotification now makes exactly ONE status write — the terminal
+	// status. The 'processing' mark is done atomically by ClaimPendingNotifications
+	// (verified in repository-level tests), not here.
+	if len(repo.updateCalls) != 1 {
+		t.Fatalf("expected 1 update call, got %d", len(repo.updateCalls))
 	}
 
-	// First call: mark as processing
-	if repo.updateCalls[0].status != "processing" {
-		t.Errorf("expected first status 'processing', got '%s'", repo.updateCalls[0].status)
+	// The single call marks the notification as sent.
+	if repo.updateCalls[0].status != "sent" {
+		t.Errorf("expected status 'sent', got '%s'", repo.updateCalls[0].status)
 	}
-
-	// Second call: mark as sent
-	if repo.updateCalls[1].status != "sent" {
-		t.Errorf("expected second status 'sent', got '%s'", repo.updateCalls[1].status)
-	}
-	if repo.updateCalls[1].attempt != 1 {
-		t.Errorf("expected attempt 1, got %d", repo.updateCalls[1].attempt)
+	if repo.updateCalls[0].attempt != 1 {
+		t.Errorf("expected attempt 1, got %d", repo.updateCalls[0].attempt)
 	}
 }
 
@@ -126,15 +124,15 @@ func TestWorker_ProcessNotification_FailWithRetry(t *testing.T) {
 
 	w.processNotification(context.Background(), notif)
 
-	if len(repo.updateCalls) != 2 {
-		t.Fatalf("expected 2 update calls, got %d", len(repo.updateCalls))
+	// One terminal update: back to 'pending' for retry.
+	if len(repo.updateCalls) != 1 {
+		t.Fatalf("expected 1 update call, got %d", len(repo.updateCalls))
 	}
 
-	// Second call: back to pending for retry
-	if repo.updateCalls[1].status != "pending" {
-		t.Errorf("expected status 'pending' for retry, got '%s'", repo.updateCalls[1].status)
+	if repo.updateCalls[0].status != "pending" {
+		t.Errorf("expected status 'pending' for retry, got '%s'", repo.updateCalls[0].status)
 	}
-	if repo.updateCalls[1].errorMsg == nil {
+	if repo.updateCalls[0].errorMsg == nil {
 		t.Error("expected error message to be set")
 	}
 }
@@ -155,12 +153,13 @@ func TestWorker_ProcessNotification_FailMaxRetries(t *testing.T) {
 
 	w.processNotification(context.Background(), notif)
 
-	// Second call should be "dead_lettered" (moved to DLQ after max retries)
-	if repo.updateCalls[1].status != db.StatusDeadLettered {
-		t.Errorf("expected status '%s' after max retries, got '%s'", db.StatusDeadLettered, repo.updateCalls[1].status)
+	// After the 'processing' mark moved into ClaimPendingNotifications, the only
+	// update recorded here is the DLQ move (via MoveToDeadLetter) after max retries.
+	if repo.updateCalls[0].status != db.StatusDeadLettered {
+		t.Errorf("expected status '%s' after max retries, got '%s'", db.StatusDeadLettered, repo.updateCalls[0].status)
 	}
-	if repo.updateCalls[1].attempt != 3 {
-		t.Errorf("expected attempt 3, got %d", repo.updateCalls[1].attempt)
+	if repo.updateCalls[0].attempt != 3 {
+		t.Errorf("expected attempt 3, got %d", repo.updateCalls[0].attempt)
 	}
 }
 
