@@ -65,7 +65,11 @@ const (
 )
 
 const (
-	initialAttempt = 0
+	initialAttempt      = 0
+	defaultPageLimit    = 50
+	defaultPageOffset   = 0
+	queryParamLimit     = "limit"
+	queryParamOffset    = "offset"
 )
 
 // NotificationRepository defines notification database operations.
