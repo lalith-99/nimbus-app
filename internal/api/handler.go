@@ -34,6 +34,9 @@ const (
 	headerReplay         = "X-Idempotency-Replayed"
 	headerContentType    = "Content-Type"
 	replayHeaderValue    = "true"
+	logFieldTenantID     = "tenant_id"
+	logFieldChannel      = "channel"
+	logFieldIdempotency  = "idempotency_key"
 )
 
 const (
@@ -56,7 +59,7 @@ const (
 )
 
 const (
-	errDetailInvalidChannel  = "channel must be email, sms, or webhook"
+	errDetailInvalidChannel  = "channel must be " + channelEmail + ", " + channelSMS + ", or " + channelWebhook
 	errDetailInvalidPayload  = "payload must be valid JSON"
 	errDetailMissingFields   = "tenant_id, user_id, and channel are required"
 	errDetailRequestInFlight = "another request with this idempotency key is in progress"
@@ -65,11 +68,14 @@ const (
 )
 
 const (
-	initialAttempt      = 0
-	defaultPageLimit    = 50
-	defaultPageOffset   = 0
-	queryParamLimit     = "limit"
-	queryParamOffset    = "offset"
+	initialAttempt    = 0
+	defaultPageLimit  = 50
+	defaultPageOffset = 0
+	queryParamLimit   = "limit"
+	queryParamOffset  = "offset"
+	channelEmail      = "email"
+	channelSMS        = "sms"
+	channelWebhook    = "webhook"
 )
 
 // NotificationRepository defines notification database operations.
@@ -115,7 +121,7 @@ type Handler struct {
 
 func isValidChannel(channel string) bool {
 	switch channel {
-	case db.ChannelEmail, db.ChannelSMS, db.ChannelWebhook:
+	case channelEmail, channelSMS, channelWebhook:
 		return true
 	default:
 		return false
@@ -206,9 +212,9 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 	if idempotencyKey == "" && h.idempotency != nil {
 		idempotencyKey = generateContentHash(req)
 		h.logger.Debug("auto-generated idempotency key",
-			zap.String("idempotency_key", idempotencyKey),
-			zap.String("tenant_id", req.TenantID),
-			zap.String("channel", req.Channel),
+			zap.String(logFieldIdempotency, idempotencyKey),
+			zap.String(logFieldTenantID, req.TenantID),
+			zap.String(logFieldChannel, req.Channel),
 		)
 	}
 
@@ -223,8 +229,8 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			}
 			h.logger.Warn("idempotency check failed",
 				zap.Error(err),
-				zap.String("tenant_id", req.TenantID),
-				zap.String("idempotency_key", idempotencyKey),
+				zap.String(logFieldTenantID, req.TenantID),
+				zap.String(logFieldIdempotency, idempotencyKey),
 			)
 		} else if cachedResult != nil {
 			resp := NotificationResponse{ID: cachedResult.NotificationID}
