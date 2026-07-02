@@ -23,9 +23,6 @@ const (
 	autoIdempotencyPrefix = "auto:"
 	contentHashBytes      = 16
 	contentHashSeparator  = "|"
-)
-
-const (
 	contentTypeJSON       = "application/json"
 	contentTypeProblemJSON = "application/problem+json"
 )
@@ -35,9 +32,12 @@ const (
 	headerReplay         = "X-Idempotency-Replayed"
 	headerContentType    = "Content-Type"
 	replayHeaderValue    = "true"
-	logFieldTenantID     = "tenant_id"
-	logFieldChannel      = "channel"
-	logFieldIdempotency  = "idempotency_key"
+)
+
+const (
+	logFieldTenantID    = "tenant_id"
+	logFieldChannel     = "channel"
+	logFieldIdempotency = "idempotency_key"
 )
 
 const (
@@ -75,9 +75,12 @@ const (
 	statusCreated     = http.StatusCreated
 	queryParamLimit   = "limit"
 	queryParamOffset  = "offset"
-	channelEmail      = "email"
-	channelSMS        = "sms"
-	channelWebhook    = "webhook"
+)
+
+const (
+	channelEmail   = "email"
+	channelSMS     = "sms"
+	channelWebhook = "webhook"
 )
 
 // NotificationRepository defines notification database operations.
