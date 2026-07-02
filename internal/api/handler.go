@@ -26,7 +26,8 @@ const (
 )
 
 const (
-	contentTypeJSON = "application/json"
+	contentTypeJSON       = "application/json"
+	contentTypeProblemJSON = "application/problem+json"
 )
 
 const (
@@ -71,6 +72,7 @@ const (
 	initialAttempt    = 0
 	defaultPageLimit  = 50
 	defaultPageOffset = 0
+	statusCreated     = http.StatusCreated
 	queryParamLimit   = "limit"
 	queryParamOffset  = "offset"
 	channelEmail      = "email"
