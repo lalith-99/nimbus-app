@@ -218,8 +218,10 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
+	notificationID := uuid.New()
+	reserved := false
 	if idempotencyKey != "" && h.idempotency != nil {
-		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey)
+		cachedResult, err := h.idempotency.CheckOrReserve(ctx, req.TenantID, idempotencyKey, notificationID)
 		if err != nil {
 			if errors.Is(err, redis.ErrDuplicateRequest) {
 				h.writeError(w, http.StatusConflict, errTypeDuplicateRequest,
@@ -239,11 +241,13 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(cachedResult.StatusCode)
 			_ = json.NewEncoder(w).Encode(resp)
 			return
+		} else {
+			reserved = true
 		}
 	}
 
 	notif := &db.Notification{
-		ID:       uuid.New(),
+		ID:       notificationID,
 		TenantID: tenantID,
 		UserID:   userID,
 		Channel:  req.Channel,
@@ -261,8 +265,8 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		// The request failed AFTER we reserved the idempotency key. Release the
 		// reservation so a retry isn't rejected with 409 for the next 5 minutes.
 		// (Release is a no-op if a result was already stored, so it's safe here.)
-		if idempotencyKey != "" && h.idempotency != nil {
-			if relErr := h.idempotency.Release(ctx, req.TenantID, idempotencyKey); relErr != nil {
+		if reserved {
+			if relErr := h.idempotency.Release(ctx, req.TenantID, idempotencyKey, notificationID); relErr != nil {
 				h.logger.Warn("failed to release idempotency reservation",
 					zap.Error(relErr),
 					zap.String("idempotency_key", idempotencyKey),
@@ -279,7 +283,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		zap.String("channel", req.Channel),
 	)
 
-	if idempotencyKey != "" && h.idempotency != nil {
+	if reserved {
 		result := &redis.IdempotencyResult{
 			NotificationID: notif.ID.String(),
 			StatusCode:     http.StatusCreated,
@@ -288,7 +292,7 @@ func (h *Handler) CreateNotification(w http.ResponseWriter, r *http.Request) {
 		if clientProvidedKey {
 			ttl = redis.IdempotencyTTLExact
 		}
-		if err := h.idempotency.Store(ctx, req.TenantID, idempotencyKey, result, ttl); err != nil {
+		if err := h.idempotency.Store(ctx, req.TenantID, idempotencyKey, notificationID, result, ttl); err != nil {
 			h.logger.Warn("failed to store idempotency result",
 				zap.Error(err),
 				zap.String("idempotency_key", idempotencyKey),

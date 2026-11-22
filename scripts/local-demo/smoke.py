@@ -77,8 +77,8 @@ class Smoke:
         state = self.request(self.receiver, f"/scenarios/{name}")[0]
         return [item for item in state["deliveries"] if item["notification_id"] == notification_id]
 
-    def create(self, name, key):
-        body = {
+    def payload(self, name):
+        return {
             "tenant_id": self.tenant,
             "user_id": self.user,
             "channel": "webhook",
@@ -87,6 +87,9 @@ class Smoke:
                 "body": {"message": "Nimbus local demo", "run_id": self.run_id},
             },
         }
+
+    def create(self, name, key):
+        body = self.payload(name)
         result, _ = self.request(self.api, "/v1/notifications", "POST", body, 201,
                                  {"Idempotency-Key": key})
         uuid.UUID(result["id"])
@@ -120,14 +123,29 @@ class Smoke:
         success = "success-" + self.run_id
         self.scenario(success, 0)
         key = "local-demo-" + self.run_id
-        notification_id, body = self.create(success, key)
+        body = self.payload(success)
+        race = Barrier(6)
+
+        def create_once(_):
+            race.wait(timeout=5)
+            return self.request(self.api, "/v1/notifications", "POST", body, (201, 409),
+                                {"Idempotency-Key": key})[0]
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            replies = list(pool.map(create_once, range(6)))
+        accepted_ids = {reply["id"] for reply in replies if "id" in reply}
+        assert len(accepted_ids) == 1, f"concurrent creates returned IDs {accepted_ids}"
+        notification_id, = accepted_ids
+        rows, _ = self.request(self.api, f"/v1/notifications?tenant_id={self.tenant}")
+        assert [row["id"] for row in rows["data"]] == [notification_id], "expected one stored row"
+
         replay, headers = self.request(self.api, "/v1/notifications", "POST", body, 201,
                                        {"Idempotency-Key": key})
         assert replay["id"] == notification_id, "replay created a second notification"
         assert headers.get("X-Idempotency-Replayed") == "true", "missing Redis replay header"
         self.wait_status(notification_id, "sent", 1)
         assert [item["status"] for item in self.deliveries(success, notification_id)] == [200]
-        print("PASS: create → sent; replay returned the same ID; one webhook delivery observed.", flush=True)
+        print("PASS: six concurrent creates stored one row; replay returned its ID; one webhook delivery observed.", flush=True)
 
         retry = "retry-" + self.run_id
         self.scenario(retry, 1)

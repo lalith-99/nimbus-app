@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
@@ -86,95 +87,75 @@ func (s *IdempotencyService) Check(ctx context.Context, tenantID, idempotencyKey
 	return &result, nil
 }
 
-// Store saves the result of a successfully processed request.
-// ttl controls how long the key is cached:
-//   - Auto-generated keys (content-based): 5 min — catches network retries
-//   - Client-provided keys (Idempotency-Key header): 24h — explicit dedup control
-func (s *IdempotencyService) Store(ctx context.Context, tenantID, idempotencyKey string, result *IdempotencyResult, ttl time.Duration) error {
+// The marker and cached result keep their original wire formats. A separate
+// expiring ownership key distinguishes consecutive reservations of the same key.
+func (s *IdempotencyService) keys(tenantID, idempotencyKey string) []string {
 	key := s.buildKey(tenantID, idempotencyKey)
-
-	if result.CreatedAt == 0 {
-		result.CreatedAt = time.Now().Unix()
-	}
-
-	data, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("failed to marshal result: %w", err)
-	}
-
-	if err := s.client.rdb.Set(ctx, key, data, ttl).Err(); err != nil {
-		return fmt.Errorf("redis set failed: %w", err)
-	}
-
-	return nil
+	return []string{key, "owner:" + key}
 }
 
-// Reserve acquires an idempotency lock using SET NX (atomic set-if-not-exists).
-// Returns true if lock acquired, false if key already exists.
-func (s *IdempotencyService) Reserve(ctx context.Context, tenantID, idempotencyKey string) (bool, error) {
-	key := s.buildKey(tenantID, idempotencyKey)
-
-	set, err := s.client.rdb.SetNX(ctx, key, processingMarker, processingTTL).Result()
-	if err != nil {
-		return false, fmt.Errorf("redis setnx failed: %w", err)
-	}
-
-	return set, nil
-}
-
-// CheckOrReserve atomically checks for an existing result or reserves the key.
-// Returns cached result if found, nil if reserved successfully, or error.
-func (s *IdempotencyService) CheckOrReserve(ctx context.Context, tenantID, idempotencyKey string) (*IdempotencyResult, error) {
-	result, err := s.Check(ctx, tenantID, idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-	if result != nil {
-		return result, nil
-	}
-
-	reserved, err := s.Reserve(ctx, tenantID, idempotencyKey)
-	if err != nil {
-		return nil, err
-	}
-
-	if !reserved {
-		return nil, ErrDuplicateRequest
-	}
-
-	return nil, nil
-}
-
-// releaseScript atomically deletes the key ONLY if it still holds the
-// "processing" marker. We must not delete a key that has already been
-// overwritten with a real stored result — that would let a duplicate request
-// re-execute. Compare-and-delete in a single Lua script makes this race-free
-// (Redis runs the whole script atomically).
-var releaseScript = redis.NewScript(`
-	if redis.call("GET", KEYS[1]) == ARGV[1] then
-		return redis.call("DEL", KEYS[1])
+var reserveScript = redis.NewScript(`
+	if redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[3], "NX") then
+		redis.call("SET", KEYS[2], ARGV[2], "PX", ARGV[3])
+		return 1
 	end
 	return 0
 `)
 
-// Release frees a reservation made by CheckOrReserve when the request ultimately
-// FAILED (e.g. the DB write errored). Without this, the "processing" marker would
-// linger for the full processingTTL (5 min), and every retry of the failed
-// request would get a 409 Conflict — effectively a 5-minute outage for that key.
-//
-// It is a no-op if the key already holds a stored success result, so it's always
-// safe to call on the error path.
-//
-// Interview talking point:
-// "Reserving an idempotency key is a lock. Any lock you take, you must release on
-//
-//	the failure path — otherwise a transient DB blip poisons that key for the whole
-//	TTL and the client can't retry. I release with a compare-and-delete Lua script
-//	so I never clobber a result that another request legitimately stored."
-func (s *IdempotencyService) Release(ctx context.Context, tenantID, idempotencyKey string) error {
-	key := s.buildKey(tenantID, idempotencyKey)
-	if err := releaseScript.Run(ctx, s.client.rdb, []string{key}, processingMarker).Err(); err != nil {
-		return fmt.Errorf("redis release failed: %w", err)
+// CheckOrReserve returns a cached result, a conflict, or a reservation owned
+// by the supplied request ID. Only that reservation may publish or release.
+func (s *IdempotencyService) CheckOrReserve(ctx context.Context, tenantID, idempotencyKey string, owner uuid.UUID) (*IdempotencyResult, error) {
+	result, err := s.Check(ctx, tenantID, idempotencyKey)
+	if err != nil || result != nil {
+		return result, err
+	}
+	acquired, err := reserveScript.Run(ctx, s.client.rdb, s.keys(tenantID, idempotencyKey),
+		processingMarker, owner.String(), processingTTL.Milliseconds()).Int()
+	if err != nil {
+		return nil, fmt.Errorf("reserve idempotency key: %w", err)
+	}
+	if acquired == 0 {
+		return nil, ErrDuplicateRequest
+	}
+	return nil, nil
+}
+
+// finishScript changes a reservation only while both the marker and owner match.
+var finishScript = redis.NewScript(`
+	if redis.call("GET", KEYS[1]) ~= ARGV[1] or redis.call("GET", KEYS[2]) ~= ARGV[2] then
+		return 0
+	end
+	if #ARGV == 2 then
+		redis.call("DEL", KEYS[1])
+	else
+		redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
+	end
+	redis.call("DEL", KEYS[2])
+	return 1
+`)
+
+var ErrReservationLost = errors.New("request no longer owns idempotency reservation")
+
+func (s *IdempotencyService) Store(ctx context.Context, tenantID, idempotencyKey string, owner uuid.UUID, result *IdempotencyResult, ttl time.Duration) error {
+	if result.CreatedAt == 0 {
+		result.CreatedAt = time.Now().Unix()
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal idempotency result: %w", err)
+	}
+	stored, err := finishScript.Run(ctx, s.client.rdb, s.keys(tenantID, idempotencyKey),
+		processingMarker, owner.String(), data, ttl.Milliseconds()).Int()
+	if err != nil {
+		return fmt.Errorf("store idempotency result: %w", err)
+	}
+	if stored == 0 {
+		return ErrReservationLost
 	}
 	return nil
+}
+
+// Release is a no-op when the reservation has expired or another request owns it.
+func (s *IdempotencyService) Release(ctx context.Context, tenantID, idempotencyKey string, owner uuid.UUID) error {
+	return finishScript.Run(ctx, s.client.rdb, s.keys(tenantID, idempotencyKey), processingMarker, owner.String()).Err()
 }

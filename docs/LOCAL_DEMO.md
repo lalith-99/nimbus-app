@@ -27,14 +27,13 @@ of its time waiting for the worker's 5-second polling interval.
 
 The script checks:
 
-1. A webhook notification is accepted and becomes `sent`.
+1. Six concurrent REST creates share one tenant and idempotency key. The tenant has one stored notification, which becomes `sent`.
 2. Repeating its `Idempotency-Key` returns the same notification ID and the
    `X-Idempotency-Replayed: true` header. The local receiver observes one delivery.
 3. An actual webhook `503` leaves the notification `pending` with a scheduled
    retry. A later actual delivery succeeds.
 4. A worker failure at the retry limit creates a DLQ record.
-5. Retrying that DLQ record creates a new notification, delivers it, and marks the
-   original DLQ record `retried`.
+5. Six concurrent retries of one DLQ record produce one replacement. The worker delivers it and the original DLQ record points to that replacement.
 
 **Retry/DLQ fixture boundary:** normal retry delays are 1 minute, 5 minutes, then
 15 minutes. To keep this walkthrough short, the script uses the existing status

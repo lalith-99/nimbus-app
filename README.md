@@ -56,7 +56,7 @@ The polling interval is 5 seconds without SQS and 30 seconds when SQS is configu
 ### Delivery semantics and limits
 
 - A successful creation response means the notification was persisted, not delivered to its recipient.
-- Redis request deduplication applies to REST creation while the key and cached result remain available. It is separate from provider-side duplicate prevention, and is disabled if Redis cannot be initialized.
+- Redis request deduplication applies to REST creation while the key and cached result remain available. Requests continue if Redis is unavailable. PostgreSQL insertion and Redis result caching are separate writes, so a failure or reservation expiry between them can allow a duplicate row. An expired reservation cannot release a newer request's lock or replace its cached response.
 - After a claim expires and another worker reclaims it, PostgreSQL rejects status and dead-letter writes from the old worker. [The PostgreSQL regression test](internal/db/claim_test.go) exercises delayed success, retry, and dead-letter writes before and after completion.
 - A worker can send successfully and crash before recording `sent`. Reclaiming or retrying that row can send again. Long-running work can also outlive the stale-claim threshold. **Exactly-once external delivery is not guaranteed.**
 - Retries are bounded: the worker uses delays of 1, 5, and then 15 minutes, with a maximum of 5 attempts before dead-letter handling. Provider acceptance is not proof that a person received or read a message.
@@ -91,6 +91,8 @@ go build ./cmd/gateway
 docker compose up --build --wait
 docker compose run --rm smoke
 ```
+
+The [local smoke script](scripts/local-demo/smoke.py) races six REST creates using one key and verifies one row and one webhook. It also races six dead-letter retries and checks the recovered notification. [Redis tests](internal/redis/idempotency_test.go) exercise reservation expiry and delayed writers.
 
 The tests exercise REST validation and repository interactions, gRPC tenant checks, worker success/retry/dead-letter paths, SQS consumer acknowledgement decisions, Redis request reservation/replay, rate limiting, and circuit-breaker transitions. Many unit tests use fakes; the Compose walkthrough exercises the real gateway, PostgreSQL, Redis, and local webhook receiver together.
 
