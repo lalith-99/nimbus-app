@@ -1,0 +1,57 @@
+name: Local webhook performance
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/webhook-load.yml'
+      - 'scripts/perf/webhook-load.py'
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: candidate
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v4
+        with:
+          path: baseline
+          ref: 848cdbc6ed7584433b066aa86c4a6c79ac3f1235
+      - name: Record runner and revisions
+        run: |
+          uname -a
+          lscpu | grep -E 'CPU\(s\)|Model name'
+          free -h
+          python3 --version
+          docker version --format '{{.Server.Version}}'
+          git -C baseline rev-parse HEAD
+          git -C candidate rev-parse HEAD
+      - name: Run matched bursts and reconcile the large candidate run
+        env:
+          RESULT: ${{ runner.temp }}/webhook-load.jsonl
+        run: |
+          set -eu
+          for variant in baseline candidate; do
+            (
+              cd "$variant"
+              trap 'docker compose -p nimbus-perf down -v --remove-orphans' EXIT
+              docker compose -p nimbus-perf up --build --wait --wait-timeout 180
+              for repeat in 1 2 3; do
+                python3 ../candidate/scripts/perf/webhook-load.py --variant "$variant" --count 200 --output "$RESULT"
+              done
+              if [ "$variant" = candidate ]; then
+                python3 scripts/perf/webhook-load.py --variant candidate-large --count 10000 --output "$RESULT"
+              fi
+            )
+          done
+      - name: Retain raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook-load-results
+          path: ${{ runner.temp }}/webhook-load.jsonl
