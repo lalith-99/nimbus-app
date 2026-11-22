@@ -15,6 +15,7 @@ Complete reference for the Nimbus notification platform. Nimbus exposes **two tr
 ## Table of Contents
 
 - [Conventions](#conventions)
+  - [Access boundaries](#access-boundaries)
   - [Identifiers](#identifiers)
   - [Error Format](#error-format-problemjson)
   - [Idempotency](#idempotency)
@@ -32,14 +33,23 @@ Complete reference for the Nimbus notification platform. Nimbus exposes **two tr
 
 ## Conventions
 
+### Access boundaries
+
+The supplied Compose stack is a local development environment. REST accepts tenant IDs from
+request bodies or query parameters; it does not authenticate callers or authorize access to
+notification, status, DLQ, or circuit-reset routes. A tenant ID is a data key, not an access check.
+gRPC separately enforces token-to-tenant ownership. See [Local demo](LOCAL_DEMO.md) for the
+loopback-only setup and [Architecture](ARCHITECTURE.md) for the current boundaries.
+
 ### Identifiers
 
-All `id`, `tenant_id`, and `user_id` values are **UUID v4** strings, e.g.
-`00000000-0000-0000-0000-000000000001`. Invalid UUIDs return `400`.
+`id`, `tenant_id`, and `user_id` values are parsed as UUIDs. The server generates v4 notification
+IDs, but it does not require supplied UUIDs to be v4. Local fixtures use
+`00000000-0000-0000-0000-000000000001`. Invalid UUIDs return `400` on REST routes.
 
 ### Error Format (problem+json)
 
-Every error response uses `Content-Type: application/problem+json`
+Notification and DLQ handler errors use `Content-Type: application/problem+json`
 ([RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807)) with this shape:
 
 ```json
@@ -58,13 +68,16 @@ Every error response uses `Content-Type: application/problem+json`
 | `status` | Mirrors the HTTP status code. |
 | `detail` | Optional, more specific explanation. |
 
+Router errors and the circuit-reset endpoint do not all use this shape.
+
 ### Idempotency
 
-`POST /v1/notifications` is **idempotent** when Redis is enabled.
+`POST /v1/notifications` supports Redis-backed request reservation and response replay while the
+tenant-scoped key remains available. This applies to REST creation, not gRPC or provider delivery.
 
 | Header | Direction | Meaning |
 |---|---|---|
-| `Idempotency-Key: <string>` | request | Client-controlled dedup key. Retained **24 h**. Recommended for all writes. |
+| `Idempotency-Key: <string>` | request | Client-controlled creation key. A completed response is retained **24 h**. |
 | `X-Idempotency-Replayed: true` | response | The response was served from cache, not freshly created. |
 
 - **No header supplied?** Nimbus auto-generates a content-hash key
@@ -72,6 +85,10 @@ Every error response uses `Content-Type: application/problem+json`
   retries without blocking intentional re-sends.
 - A request that arrives **while an identical one is still in flight** returns `409 Conflict`
   (`duplicate_request`).
+- Use a new key for a new operation. Reusing an explicit key replays its result without comparing
+  the new payload. Redis failures, expiry, and the gap between the database write and cache update
+  can allow another notification to be created. Request replay does not prevent duplicate sends
+  after a worker or provider failure.
 
 ```bash
 curl -X POST http://localhost:8080/v1/notifications \
@@ -82,14 +99,19 @@ curl -X POST http://localhost:8080/v1/notifications \
 
 ### Rate Limiting
 
-All `/v1/*` routes are rate limited **per tenant** using a Redis sliding window.
+The notification, DLQ, and enabled AI routes use a Redis sliding window keyed by `X-Tenant-ID`,
+or by the `tenant_id` query parameter when that header is absent. The JSON body's tenant ID is
+not read by this middleware. Requests without either key skip the limiter; the supplied key is
+not authenticated.
 
 | Limit | Window | Scope |
 |---|---|---|
-| 100 requests | 60 seconds (rolling) | per `tenant_id` |
+| 100 requests | 60 seconds (rolling) | per supplied tenant key |
 
 Exceeding the limit returns `429 Too Many Requests`. (If Redis is unavailable, rate limiting is
-disabled and requests pass through — fail-open.)
+disabled and requests pass through — fail-open.) The separate check/add operations can overshoot
+under concurrency, so this is not a strict atomic quota. Circuit-status and reset routes are
+registered separately from this middleware.
 
 ### Enumerations
 
@@ -136,7 +158,7 @@ Live state of every downstream circuit breaker.
 ```
 
 #### `POST /v1/admin/circuits/{name}/reset`
-Force a breaker back to `closed` (next request becomes a probe). `name` ∈
+Reset a breaker to `closed`. `name` ∈
 `ses-email`, `sns-sms`, `webhook`. Returns `200` with `{"status":"reset","breaker":"..."}` or
 `404` if the name is unknown.
 
@@ -154,7 +176,7 @@ Create (enqueue) a notification.
 | `tenant_id` | UUID | ✓ | Owning tenant. |
 | `user_id` | UUID | ✓ | Triggering user. |
 | `channel` | enum | ✓ | `email` \| `sms` \| `webhook`. |
-| `payload` | JSON object | ✓ | Channel-specific (see below). |
+| `payload` | JSON object | Required for successful delivery | Channel-specific (see below); sender validation happens asynchronously. |
 
 **Channel payloads**
 
@@ -163,7 +185,7 @@ Create (enqueue) a notification.
 { "to": "user@example.com", "subject": "Welcome", "body": "Hello!" }
 
 // sms
-{ "to": "+15551234567", "body": "Your code is 123456" }
+{ "phone_number": "+15551234567", "message": "Your code is 123456" }
 
 // webhook
 { "url": "https://hooks.example.com/x", "body": { "event": "order.shipped" } }
@@ -183,6 +205,10 @@ curl -X POST http://localhost:8080/v1/notifications \
 ```
 
 **`201 Created`**
+
+The request has been persisted; this is not proof of delivery. Missing channel payload fields can
+be accepted here and then fail in the worker. Use [the local webhook example](LOCAL_DEMO.md#send-one-notification-manually)
+to exercise delivery without AWS credentials.
 
 ```json
 { "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7" }
@@ -244,7 +270,7 @@ Manually transition a notification's status (admin/testing).
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `status` | enum | ✓ | `pending` \| `processing` \| `sent` \| `failed`. |
-| `attempt` | int | ✓ | Must be ≥ 0. |
+| `attempt` | int | — | Must be ≥ 0; omitted values become 0. |
 | `error` | string | — | Optional error message. |
 
 **`200 OK`** → `{ "id": "...", "status": "sent" }`. Errors: `400`, `500`.
@@ -296,7 +322,8 @@ Permanently abandon a DLQ item (marks it `discarded`).
 
 ### AI Endpoints
 
-> Available only when the server is started with `OPENAI_API_KEY` set (`AI_ENABLED`).
+> These routes are registered when the optional AI clients are enabled by `OPENAI_API_KEY`.
+> `AI_ENABLED` is not a separate configuration variable. The local demo leaves the key empty.
 
 #### `POST /v1/ai/compose`
 Turn a natural-language instruction into one or more notifications via LLM **function calling**.
@@ -372,14 +399,18 @@ metadata: authorization: Bearer <token>
 
 Configure tokens via `GRPC_AUTH_TOKENS="token1:tenant-uuid-1,token2:tenant-uuid-2"`.
 Dev default: `dev-token-nimbus` → `00000000-0000-0000-0000-000000000001`.
+The current loader adds configured mappings without removing this public development token.
 
 ### RPCs
 
 | RPC | Type | Description |
 |---|---|---|
-| `CreateNotification` | unary | Enqueue a notification (mirrors `POST /v1/notifications`). |
+| `CreateNotification` | unary | Persist a pending notification for the polling worker. |
 | `GetNotification` | unary | Fetch one notification (tenant-scoped). |
 | `StreamDeliveryUpdates` | **server-streaming** | Push live status updates every 2s until terminal. |
+
+REST request deduplication, rate limiting, and best-effort SQS publishing are not wired into these
+RPCs. The transports share notification storage and worker delivery, but have different request paths.
 
 #### `CreateNotification`
 
@@ -420,20 +451,24 @@ message DeliveryUpdate {
   string notification_id = 1;
   string status          = 2;
   int32  attempt         = 3;
-  string error_message   = 4;                 // set when status = "failed"
+  string error_message   = 4;                 // populated when the stored error is non-null
   google.protobuf.Timestamp updated_at = 5;
 }
 ```
 
 Ownership is verified **once up front**; the stream closes automatically when the notification
-reaches a terminal state (`sent` / `failed` / `dead_lettered`).
+reaches a terminal state (`sent` / `failed` / `dead_lettered`). Each active stream polls the database
+every 2 seconds and emits a snapshot even when the status is unchanged. `updated_at` is the emission
+time, not the stored notification's last-change timestamp.
 
-**Example (grpcurl):**
+**Example (grpcurl, from the repository root):** server reflection is not enabled, so load the
+checked-in protobuf. Replace `NOTIFICATION_ID` with an ID created for the development token's tenant.
 
 ```bash
 grpcurl -plaintext \
+  -import-path proto -proto notification/v1/notification.proto \
   -H "authorization: Bearer dev-token-nimbus" \
-  -d '{"notification_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7"}' \
+  -d '{"notification_id":"NOTIFICATION_ID"}' \
   localhost:9090 notification.v1.NotificationService/StreamDeliveryUpdates
 ```
 
