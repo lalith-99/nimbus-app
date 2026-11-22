@@ -139,6 +139,25 @@ func (r *Repository) UpdateNotificationStatus(
 	return nil
 }
 
+// ErrClaimLost means the notification was completed, changed, or reclaimed.
+var ErrClaimLost = errors.New("notification claim is no longer current")
+
+// FinishClaim uses the database timestamp returned by the claim, shared by
+// both claiming paths. A timed-out worker must not replace a later outcome.
+func (r *Repository) FinishClaim(ctx context.Context, notif *Notification, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
+	result, err := r.db.Pool().Exec(ctx, `UPDATE notifications
+		SET status=$1, attempt=$2, error_message=$3, next_retry_at=$4
+		WHERE id=$5 AND status='processing' AND updated_at=$6`,
+		status, attempt, errorMsg, nextRetryAt, notif.ID, notif.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("finish claimed notification: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
 // ListNotificationsByTenant retrieves notifications for a tenant with pagination
 func (r *Repository) ListNotificationsByTenant(
 	ctx context.Context,
@@ -406,6 +425,15 @@ func (r *Repository) MoveToDeadLetter(ctx context.Context, notif *Notification, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	result, err := tx.Exec(ctx, `UPDATE notifications SET status=$1, attempt=$2, error_message=$3, next_retry_at=NULL
+		WHERE id=$4 AND status='processing' AND updated_at=$5`, StatusDeadLettered, notif.Attempt, lastError, notif.ID, notif.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("finish dead-lettered notification: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return nil, ErrClaimLost
+	}
+
 	// Insert into dead letter queue
 	dlq := &DeadLetterNotification{
 		ID:                     uuid.New(),
@@ -441,13 +469,6 @@ func (r *Repository) MoveToDeadLetter(ctx context.Context, notif *Notification, 
 
 	if err != nil {
 		return nil, fmt.Errorf("insert dead letter: %w", err)
-	}
-
-	// Update original notification status
-	updateQuery := `UPDATE notifications SET status = $1 WHERE id = $2`
-	_, err = tx.Exec(ctx, updateQuery, StatusDeadLettered, notif.ID)
-	if err != nil {
-		return nil, fmt.Errorf("update notification status: %w", err)
 	}
 
 	if err = tx.Commit(ctx); err != nil {

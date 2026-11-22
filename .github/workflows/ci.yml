@@ -53,9 +53,18 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Apply notification and dead-letter schemas
+        env:
+          PGPASSWORD: nimbus123
+        run: |
+          psql -h localhost -U nimbus -d nimbus -v ON_ERROR_STOP=1 \
+            -f migrations/001_create_notifications.up.sql \
+            -f migrations/002_create_dead_letter_queue.up.sql
+
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
         env:
+          NIMBUS_TEST_DATABASE_URL: postgres://nimbus:nimbus123@localhost:5432/nimbus?sslmode=disable
           DB_HOST: localhost
           DB_PORT: 5432
           DB_USER: nimbus
