@@ -61,49 +61,49 @@ func New(repo Repository, sender Sender, cfg Config, logger *zap.Logger) *Worker
 }
 
 func (w *Worker) Start(ctx context.Context) {
-	ticker := time.NewTicker(w.config.PollInterval)
-	defer ticker.Stop()
-
+	timer := time.NewTimer(w.config.PollInterval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			w.logger.Info("worker stopping")
 			return
-		case <-ticker.C:
-			w.logger.Debug("checking for notifications",
-				zap.Int("batch_size", w.config.BatchSize),
-			)
-			w.processBatch(ctx)
+		case <-timer.C:
+			for ctx.Err() == nil && w.processBatch(ctx) {
+				// A full batch suggests more eligible work. Claim the next batch
+				// only after dispatching the current one.
+			}
+			timer.Reset(w.config.PollInterval)
 		}
 	}
 }
 
-func (w *Worker) processBatch(ctx context.Context) {
-	// Claim and mark eligible rows in one database statement. Row locks coordinate
-	// active claims; the timeout also makes stale processing rows reclaimable.
-	// A retry after an ambiguous send or failed status write can still resend.
+// processBatch returns true when a full batch completed with durable outcomes.
+// Short batches, empty queues and persistence errors return to idle polling.
+func (w *Worker) processBatch(ctx context.Context) bool {
 	notifications, err := w.repo.ClaimPendingNotifications(ctx, w.config.BatchSize)
 	if err != nil {
 		w.logger.Error("failed to claim pending notifications", zap.Error(err))
-		return
+		return false
 	}
-	if len(notifications) == 0 {
-		return
-	}
-	// Loop through each notification from the list of notifications
+	more := len(notifications) == w.config.BatchSize
 	for _, notif := range notifications {
-		// Process each notification
-		w.processNotification(ctx, notif)
+		if ctx.Err() != nil {
+			return false
+		}
+		if err := w.processNotification(ctx, notif); err != nil {
+			more = false
+		}
 	}
+	return more
 }
 
-// processNotification is a thin delegate kept for the poller path (and existing
-// tests). The real send/retry/DLQ logic lives in Dispatcher.Dispatch so it can be
-// shared verbatim with the SQS consumer — one code path, one set of semantics.
-func (w *Worker) processNotification(ctx context.Context, notif *db.Notification) {
-	if err := w.dispatcher.Dispatch(ctx, notif); err != nil {
+func (w *Worker) processNotification(ctx context.Context, notif *db.Notification) error {
+	err := w.dispatcher.Dispatch(ctx, notif)
+	if err != nil {
 		w.logger.Warn("could not persist dispatch outcome", zap.String("id", notif.ID.String()), zap.Error(err))
 	}
+	return err
 }
 
 // Dispatcher owns the "given an already-claimed notification, send it and record
