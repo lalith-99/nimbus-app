@@ -1,9 +1,9 @@
 # Local webhook demo
 
 Run Nimbus with PostgreSQL, Redis, and a deterministic webhook receiver. The
-default Compose stack uses the database polling worker and makes no AWS or OpenAI
-calls. You need Docker Engine/Desktop with Docker Compose v2; no Go, Python, AWS
-account, or cloud credentials are required on the host.
+walkthrough uses the database polling worker and local webhook delivery, with no
+paid AWS or OpenAI calls. You need Docker Engine/Desktop with Docker Compose v2;
+no Go, Python, AWS account, or cloud credentials are required on the host.
 
 ## Start and verify
 
@@ -53,11 +53,16 @@ load capacity, or exactly-once external delivery. The normal retry schedule is u
 | Webhook fixture | `http://127.0.0.1:9080` | Inspect deliveries and configure local failures |
 | PostgreSQL/Redis | Compose network only | Durable notification state and request deduplication |
 
-Ports are bound to loopback. The Compose network is `internal`, so running
-containers cannot call external hosts. AWS SDK clients receive fixed dummy
-credentials; SQS queue URLs and the OpenAI key are explicitly empty, even if the
-host has a populated `.env`. The demo submits only the `webhook` channel. Email,
-SMS, SQS, and AI/RAG integrations are not exercised by this walkthrough.
+HTTP, gRPC, and fixture ports are bound to loopback; PostgreSQL and Redis do not
+publish host ports. The stack uses a standard Docker bridge so the documented
+localhost endpoints are reachable. **This network allows outbound connectivity; it
+is not an egress isolation boundary.**
+
+The walkthrough avoids paid provider calls by submitting only the local `webhook`
+channel. AWS SDK clients receive fixed dummy credentials; SQS queue URLs and the
+OpenAI key are explicitly empty, even if the host has a populated `.env`. Email,
+SMS, SQS, and AI/RAG integrations are not exercised. Changing those settings or
+submitting requests to external delivery providers is outside this local demo.
 
 This is a local development configuration. The REST routes include administrative
 operations and do not establish a production authentication/authorization boundary.

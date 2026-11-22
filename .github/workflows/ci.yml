@@ -106,7 +106,7 @@ jobs:
       - name: Validate Compose configuration
         run: docker compose --profile tools config --quiet
 
-      - name: Start the isolated local stack
+      - name: Start the local webhook stack
         run: docker compose up --build --wait --wait-timeout 120
 
       - name: Verify published REST and gRPC ports

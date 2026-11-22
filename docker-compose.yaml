@@ -1,6 +1,6 @@
 name: nimbus-local
 
-# Local webhook demo. No cloud credentials or external delivery services are used.
+# Local webhook demo. The walkthrough uses dummy credentials and local delivery.
 services:
   gateway:
     build: .
@@ -115,8 +115,8 @@ services:
 
 networks:
   default:
-    # Containers can reach each other, but cannot call AWS/OpenAI or other hosts.
-    internal: true
+    # Standard bridge supports loopback publishing; outbound access is not blocked.
+    driver: bridge
 
 volumes:
   postgres_demo_data:

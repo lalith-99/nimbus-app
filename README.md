@@ -34,7 +34,7 @@ The stack starts PostgreSQL with pgvector, applies forward migrations through a 
 
 The smoke walkthrough checks notification creation and delivery status, replay of an `Idempotency-Key`, a failed webhook attempt followed by retry, and dead-letter recovery. Retry timing is advanced using **explicit local database fixtures**; the walkthrough does not claim to wait through the normal retry schedule or simulate five real provider failures.
 
-Compose uses an isolated local network, dummy AWS credentials, and local-only port bindings. Email, SMS, SQS, and AI calls are not part of this demo.
+Compose uses loopback-only published ports and fixed dummy AWS credentials. PostgreSQL and Redis stay on the Compose network without published ports. The walkthrough sends only local webhooks; email, SMS, SQS, and AI calls are not part of it. The standard bridge network permits outbound connections.
 
 See **[the step-by-step local walkthrough](docs/LOCAL_DEMO.md)** for manual requests, expected behavior, gRPC examples, and how the retry fixtures work. If you used an older Compose setup, read its existing-volume notes before starting.
 
@@ -99,7 +99,7 @@ AWS image publishing, migration, and deployment jobs are currently disabled in C
 
 ## Configuration and API
 
-Configuration is read from environment variables in [`internal/config/config.go`](internal/config/config.go). [`docker-compose.yaml`](docker-compose.yaml) supplies the isolated demo values.
+Configuration is read from environment variables in [`internal/config/config.go`](internal/config/config.go). [`docker-compose.yaml`](docker-compose.yaml) supplies the local demo values.
 
 | Variables | Purpose |
 |---|---|
