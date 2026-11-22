@@ -322,7 +322,7 @@ Delivery runs on **two paths that coordinate through the notification row**:
 | Path | Trigger | Claim | Role |
 |---|---|---|---|
 | **SQS consumer** | message received (long-poll) | `ClaimNotificationByID` (one row) | Event-driven pickup when SQS is configured |
-| **DB-poll worker** | ticker (30s when SQS is on, else 5s) | `ClaimPendingNotifications` (batch, SKIP LOCKED) | Reconciliation backstop — delayed retries + anything SQS dropped |
+| **DB-poll worker** | idle timer (30s with SQS, else 5s), immediate next claim after a full batch | `ClaimPendingNotifications` (batch, SKIP LOCKED) | Reconciliation backstop — delayed retries + anything SQS dropped |
 
 Both paths hand the claimed row to the **same `Dispatcher`**, so send / retry / dead-letter behavior
 is identical regardless of how the row was claimed.

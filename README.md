@@ -51,7 +51,7 @@ docker compose down
 | **SQS and polling share database claims.** | REST can publish a best-effort SQS notification after the insert. The consumer claims one eligible row; the poller claims a batch with `FOR UPDATE SKIP LOCKED`. | Claims coordinate current ownership, but do not make an external provider send exactly once. Delayed retries and stale-work recovery still depend on polling. |
 | **Retry and dead-letter state stays inspectable.** | The worker records attempts and next retry times; exhausted work moves to a database dead-letter table with inspect, retry, and discard endpoints. | Recovery needs an operating database and workers. A manual retry creates a new notification and may repeat an external side effect. |
 
-The polling interval is 5 seconds without SQS and 30 seconds when SQS is configured. SQS publishing happens synchronously in the REST handler after the database insert and is best effort. The gRPC create path currently writes directly to the database and relies on the polling worker.
+After a full batch with durable outcomes, the worker immediately claims the next batch. Its idle poll interval is 5 seconds without SQS and 30 seconds with SQS. SQS publishing happens synchronously in the REST handler after the database insert and is best effort. The gRPC create path currently writes directly to the database and relies on the polling worker.
 
 ### Delivery semantics and limits
 
@@ -95,6 +95,8 @@ docker compose run --rm smoke
 The [local smoke script](scripts/local-demo/smoke.py) races six REST creates using one key and verifies one row and one webhook. It also races six dead-letter retries and checks the recovered notification. [Redis tests](internal/redis/idempotency_test.go) exercise reservation expiry and delayed writers.
 
 The tests exercise REST validation and repository interactions, gRPC tenant checks, worker success/retry/dead-letter paths, SQS consumer acknowledgement decisions, Redis request reservation/replay, rate limiting, and circuit-breaker transitions. Many unit tests use fakes; the Compose walkthrough exercises the real gateway, PostgreSQL, Redis, and local webhook receiver together.
+
+The [webhook load comparison](docs/performance/webhook-load.md) records three before/after trials and a 10,000-notification REST-to-webhook burst. The local runner delivered all 10,000 in 23.8 seconds with zero missing or duplicate receipts.
 
 The benchmarks in [`internal/sqs/producer_bench_test.go`](internal/sqs/producer_bench_test.go) measure local message construction and JSON serialization. They do **not** establish live SQS enqueue latency, provider delivery latency, or end-to-end throughput. No production capacity or latency result is claimed here.
 

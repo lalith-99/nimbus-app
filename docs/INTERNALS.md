@@ -333,22 +333,7 @@ Delivery runs on **two paths that share one atomic claim guard**, both started a
 | **SQS consumer** | `go sqsConsumer.Start(ctx)` | `ClaimNotificationByID` (one row) | Event-driven pickup when configured |
 | **DB-poll worker** | `go w.Start(ctx)` | `ClaimPendingNotifications` (batch) | Backstop — delayed retries + anything SQS dropped |
 
-The DB-poll worker's whole job is the loop in [worker.go](../internal/worker/worker.go). When SQS is
-configured it polls every **30s** (a relaxed backstop); without SQS it stays the primary path at 5s:
-
-```go
-func (w *Worker) Start(ctx context.Context) {
-    ticker := time.NewTicker(w.config.PollInterval) // 30s backstop when SQS is on, else 5s
-    for {
-        select {
-        case <-ctx.Done():        // graceful shutdown
-            return
-        case <-ticker.C:
-            w.processBatch(ctx)   // claim a batch, dispatch each row
-        }
-    }
-}
-```
+The [polling worker](../internal/worker/worker.go) wakes every five seconds when idle, or every 30 seconds in SQS backstop mode. It claims at most ten rows and dispatches them sequentially. When a full batch finishes with durable outcomes, it immediately claims another. A short batch, empty queue or persistence error returns it to the idle timer. Cancellation stops further claims. The [webhook benchmark](performance/webhook-load.md) compares this behavior with waiting a full interval between every batch.
 
 ### Claiming work in eligibility order
 
