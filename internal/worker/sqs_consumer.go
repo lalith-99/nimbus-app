@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -37,15 +38,9 @@ type SQSConsumerConfig struct {
 	Concurrency int
 }
 
-// SQSConsumer is the event-driven hot path. It long-polls SQS, atomically claims
-// each notification in the DB (the no-double-send guard shared with the poller),
-// dispatches it through the SAME Dispatcher the poller uses, then acks the message.
-//
-// Retry semantics: an SQS message is one-shot. After the first attempt we always
-// ack it. If the send failed but has retries left, Dispatch schedules it back to
-// 'pending' with a future next_retry_at, and the DB poller backstop picks it up
-// when due. This keeps the fast path simple while the poller guarantees eventual
-// delivery of retries and anything SQS ever drops.
+// SQSConsumer claims the database row before dispatch. It acknowledges a
+// committed outcome or a superseded claim. On a persistence error it keeps
+// the receipt for redelivery; the DB poller also recovers expired claims.
 type SQSConsumer struct {
 	receiver   SQSReceiver
 	repo       ClaimByIDRepository
@@ -198,6 +193,10 @@ func (s *SQSConsumer) handleMessage(ctx context.Context, msg sqs.ReceivedMessage
 	}
 
 	// Row is ours ('processing'). Reuse the exact same dispatch path as the poller.
-	s.dispatcher.Dispatch(ctx, notif)
+	err = s.dispatcher.Dispatch(ctx, notif)
+	if err != nil && !errors.Is(err, db.ErrClaimLost) {
+		s.logger.Warn("could not persist dispatch outcome", zap.String("id", id.String()), zap.Error(err))
+		return false
+	}
 	return true
 }

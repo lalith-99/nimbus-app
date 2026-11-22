@@ -35,11 +35,11 @@ func (m *MockRepository) ClaimPendingNotifications(ctx context.Context, limit in
 	return m.notifications, nil
 }
 
-func (m *MockRepository) UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
+func (m *MockRepository) FinishClaim(ctx context.Context, notif *db.Notification, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
 	if m.shouldFail {
 		return errors.New("database error")
 	}
-	m.updateCalls = append(m.updateCalls, updateCall{id, status, attempt, errorMsg})
+	m.updateCalls = append(m.updateCalls, updateCall{notif.ID, status, attempt, errorMsg})
 	return nil
 }
 

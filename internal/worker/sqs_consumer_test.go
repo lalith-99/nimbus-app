@@ -57,6 +57,8 @@ type fakeClaimRepo struct {
 	claimErr    map[uuid.UUID]error
 	claimCalls  int
 	statusCalls int
+	finishErr   error
+	dlqErr      error
 }
 
 func (r *fakeClaimRepo) ClaimNotificationByID(ctx context.Context, id uuid.UUID) (*db.Notification, error) {
@@ -69,15 +71,15 @@ func (r *fakeClaimRepo) ClaimNotificationByID(ctx context.Context, id uuid.UUID)
 	return r.claimResult[id], nil
 }
 
-func (r *fakeClaimRepo) UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
+func (r *fakeClaimRepo) FinishClaim(ctx context.Context, notif *db.Notification, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.statusCalls++
-	return nil
+	return r.finishErr
 }
 
 func (r *fakeClaimRepo) MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error) {
-	return &db.DeadLetterNotification{ID: uuid.New()}, nil
+	return &db.DeadLetterNotification{ID: uuid.New()}, r.dlqErr
 }
 
 func msg(id uuid.UUID, handle string) sqs.ReceivedMessage {
@@ -170,5 +172,38 @@ func TestSQSConsumer_InvalidID_IsDropped(t *testing.T) {
 	}
 	if got := recv.deletedHandles(); len(got) != 1 {
 		t.Errorf("expected poison message to be dropped (acked), got %v", got)
+	}
+}
+
+func TestSQSConsumer_AcknowledgesOnlyResolvedDispatch(t *testing.T) {
+	writeErr := errors.New("database unavailable")
+	for _, tc := range []struct {
+		name      string
+		sendFails bool
+		attempt   int
+		finishErr error
+		dlqErr    error
+		wantAck   bool
+	}{
+		{"success write fails", false, 0, writeErr, nil, false},
+		{"retry write fails", true, 0, writeErr, nil, false},
+		{"dead-letter write fails", true, 2, nil, writeErr, false},
+		{"claim superseded", false, 0, db.ErrClaimLost, nil, true},
+		{"dead-letter claim superseded", true, 2, nil, db.ErrClaimLost, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.New()
+			repo := &fakeClaimRepo{
+				claimResult: map[uuid.UUID]*db.Notification{id: {ID: id, Attempt: tc.attempt}},
+				finishErr:   tc.finishErr,
+				dlqErr:      tc.dlqErr,
+			}
+			recv := &fakeReceiver{}
+			consumer := newTestConsumer(recv, repo, &MockSender{shouldFail: tc.sendFails})
+			consumer.handleBatch(context.Background(), []sqs.ReceivedMessage{msg(id, "receipt")})
+			if got := len(recv.deletedHandles()) == 1; got != tc.wantAck {
+				t.Fatalf("acknowledged=%t, want %t", got, tc.wantAck)
+			}
+		})
 	}
 }

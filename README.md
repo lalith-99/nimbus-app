@@ -57,6 +57,7 @@ The polling interval is 5 seconds without SQS and 30 seconds when SQS is configu
 
 - A successful creation response means the notification was persisted, not delivered to its recipient.
 - Redis request deduplication applies to REST creation while the key and cached result remain available. It is separate from provider-side duplicate prevention, and is disabled if Redis cannot be initialized.
+- After a claim expires and another worker reclaims it, PostgreSQL rejects status and dead-letter writes from the old worker. [The PostgreSQL regression test](internal/db/claim_test.go) exercises delayed success, retry, and dead-letter writes before and after completion.
 - A worker can send successfully and crash before recording `sent`. Reclaiming or retrying that row can send again. Long-running work can also outlive the stale-claim threshold. **Exactly-once external delivery is not guaranteed.**
 - Retries are bounded: the worker uses delays of 1, 5, and then 15 minutes, with a maximum of 5 attempts before dead-letter handling. Provider acceptance is not proof that a person received or read a message.
 - The project includes tenant IDs and gRPC token-to-tenant checks. The REST routes do not currently enforce tenant authentication, and the configuration includes a development gRPC token. The supplied Compose setup is for local development, not a hardened public deployment.

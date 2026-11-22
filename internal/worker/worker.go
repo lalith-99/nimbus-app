@@ -6,7 +6,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/google/uuid"
 	"github.com/lalithlochan/nimbus/internal/db"
 )
 
@@ -15,7 +14,7 @@ type Repository interface {
 	// marking eligible rows 'processing' to coordinate active work. Stale claims
 	// may later be reclaimed; this does not prevent duplicate provider effects.
 	ClaimPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error)
-	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
+	FinishClaim(ctx context.Context, notif *db.Notification, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
 	MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error)
 }
 
@@ -23,7 +22,7 @@ type Repository interface {
 // needs to record the outcome of a send. Kept small on purpose so both the DB
 // poller (Worker) and the SQS consumer can share the exact same dispatch logic.
 type StatusRepository interface {
-	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
+	FinishClaim(ctx context.Context, notif *db.Notification, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
 	MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error)
 }
 
@@ -102,7 +101,9 @@ func (w *Worker) processBatch(ctx context.Context) {
 // tests). The real send/retry/DLQ logic lives in Dispatcher.Dispatch so it can be
 // shared verbatim with the SQS consumer — one code path, one set of semantics.
 func (w *Worker) processNotification(ctx context.Context, notif *db.Notification) {
-	w.dispatcher.Dispatch(ctx, notif)
+	if err := w.dispatcher.Dispatch(ctx, notif); err != nil {
+		w.logger.Warn("could not persist dispatch outcome", zap.String("id", notif.ID.String()), zap.Error(err))
+	}
 }
 
 // Dispatcher owns the "given an already-claimed notification, send it and record
@@ -137,49 +138,33 @@ func NewDispatcher(repo StatusRepository, sender Sender, maxRetries int, logger 
 //
 // On the SQS path, a scheduled retry ('pending' + future next_retry_at) is picked
 // up later by the DB poller backstop, since the SQS message is one-shot.
-func (d *Dispatcher) Dispatch(ctx context.Context, notif *db.Notification) {
-	// The row was already atomically marked 'processing' by the claim, so we go
-	// straight to sending — no extra status write needed here.
-	err := d.sender.Send(ctx, notif)
+func (d *Dispatcher) Dispatch(ctx context.Context, notif *db.Notification) error {
 	newAttempt := notif.Attempt + 1
-
-	if err != nil {
-		d.logger.Error("failed to send notification",
-			zap.Error(err),
-			zap.String("notification_id", notif.ID.String()),
-			zap.String("channel", notif.Channel),
-			zap.Int("attempt", newAttempt),
-		)
-
-		errMsg := err.Error()
-
-		if newAttempt >= d.maxRetries {
-			// Persist the final failed send in the DLQ attempt count, not just
-			// the attempts recorded before this dispatch began.
-			failedNotification := *notif
-			failedNotification.Attempt = newAttempt
-			_, dlqErr := d.repo.MoveToDeadLetter(ctx, &failedNotification, errMsg)
-			if dlqErr != nil {
-				d.logger.Error("failed to move notification to dead letter queue",
-					zap.String("id", notif.ID.String()),
-					zap.Error(dlqErr),
-				)
-			} else {
-				d.logger.Info("notification moved to dead letter queue",
-					zap.String("id", notif.ID.String()),
-					zap.Int("attempts", newAttempt),
-				)
-			}
-		} else {
-			nextRetry := d.calculateNextRetry(newAttempt)
-			_ = d.repo.UpdateNotificationStatus(ctx, notif.ID, "pending", newAttempt, &errMsg, &nextRetry)
+	sendErr := d.sender.Send(ctx, notif)
+	if sendErr == nil {
+		if err := d.repo.FinishClaim(ctx, notif, db.StatusSent, newAttempt, nil, nil); err != nil {
+			return err
 		}
-	} else {
-		d.logger.Info("notification sent",
-			zap.String("id", notif.ID.String()),
-		)
-		_ = d.repo.UpdateNotificationStatus(ctx, notif.ID, "sent", newAttempt, nil, nil)
+		d.logger.Info("notification sent", zap.String("id", notif.ID.String()))
+		return nil
 	}
+
+	d.logger.Error("failed to send notification",
+		zap.Error(sendErr),
+		zap.String("notification_id", notif.ID.String()),
+		zap.String("channel", notif.Channel),
+		zap.Int("attempt", newAttempt),
+	)
+	errMsg := sendErr.Error()
+	if newAttempt < d.maxRetries {
+		nextRetry := d.calculateNextRetry(newAttempt)
+		return d.repo.FinishClaim(ctx, notif, db.StatusPending, newAttempt, &errMsg, &nextRetry)
+	}
+
+	failedNotification := *notif
+	failedNotification.Attempt = newAttempt
+	_, err := d.repo.MoveToDeadLetter(ctx, &failedNotification, errMsg)
+	return err
 }
 
 // Calculate next retry time based on attempt
