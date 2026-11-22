@@ -98,6 +98,8 @@ The tests exercise REST validation and repository interactions, gRPC tenant chec
 
 The benchmarks in [`internal/sqs/producer_bench_test.go`](internal/sqs/producer_bench_test.go) measure local message construction and JSON serialization. They do **not** establish live SQS enqueue latency, provider delivery latency, or end-to-end throughput. No production capacity or latency result is claimed here.
 
+The [million-row PostgreSQL claim benchmark](docs/performance/worker-claims.md) compares the original poller query with an eligibility-time index, verifies disjoint claims across eight clients and includes the query plans and local reproduction steps.
+
 AWS image publishing, migration, and deployment jobs are currently disabled in CI. Terraform files demonstrate infrastructure configuration; they are not evidence of a currently running service.
 
 ## Configuration and API
