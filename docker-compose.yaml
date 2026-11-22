@@ -1,62 +1,123 @@
+name: nimbus-local
+
+# Local webhook demo. The walkthrough uses dummy credentials and local delivery.
 services:
   gateway:
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${NIMBUS_HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${NIMBUS_GRPC_PORT:-9090}:9090"
     environment:
-      - PORT=8080
-      - ENV=development
-      - LOG_LEVEL=info
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=${DB_USER:-nimbus}
-      - DB_PASSWORD=${DB_PASSWORD:-nimbus123}
-      - DB_NAME=${DB_NAME:-nimbus}
-      - DB_SSLMODE=disable
-      # Redis config
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      # AWS SES config
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      - SES_FROM_EMAIL=${SES_FROM_EMAIL}
+      PORT: "8080"
+      GRPC_PORT: "9090"
+      ENV: development
+      LOG_LEVEL: info
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: nimbus
+      DB_PASSWORD: nimbus-local-demo
+      DB_NAME: nimbus
+      DB_SSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      GRPC_AUTH_TOKENS: "dev-token-nimbus:00000000-0000-0000-0000-000000000001"
+      # SDK clients are constructed at startup, but the demo sends only webhooks.
+      # Fixed dummy values prevent accidental use of credentials from a host .env.
+      AWS_ACCESS_KEY_ID: local-demo
+      AWS_SECRET_ACCESS_KEY: local-demo
+      AWS_SESSION_TOKEN: ""
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_CONFIG_FILE: /dev/null
+      AWS_SHARED_CREDENTIALS_FILE: /dev/null
+      SES_FROM_EMAIL: noreply@nimbus.local
+      SQS_QUEUE_URL: ""
+      SQS_DLQ_URL: ""
+      OPENAI_API_KEY: ""
+      WEBHOOK_TIMEOUT: "5"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      webhook:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 10s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrator
+    environment:
+      DATABASE_URL: postgres://nimbus:nimbus-local-demo@postgres:5432/nimbus?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+    restart: "no"
 
   postgres:
-    image: postgres:15-alpine
-    ports:
-      - "5432:5432"
+    # Migration 003 requires the vector extension; the plain postgres image lacks it.
+    image: pgvector/pgvector:0.8.7-pg15-trixie
     environment:
-      - POSTGRES_USER=${DB_USER:-nimbus}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-nimbus123}
-      - POSTGRES_DB=${DB_NAME:-nimbus}
+      POSTGRES_USER: nimbus
+      POSTGRES_PASSWORD: nimbus-local-demo
+      POSTGRES_DB: nimbus
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
+      - postgres_demo_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nimbus"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
-      - redis_data:/data
+      - redis_demo_data:/data
     command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  webhook:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/demo/webhook_receiver.py", "--port", "9080"]
+    volumes:
+      - ./scripts/local-demo:/demo:ro
+    ports:
+      - "127.0.0.1:${NIMBUS_WEBHOOK_PORT:-9080}:9080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9080/healthz', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  smoke:
+    image: python:3.12-alpine
+    profiles: ["tools"]
+    command: ["python", "-u", "/demo/smoke.py"]
+    volumes:
+      - ./scripts/local-demo:/demo:ro
+    environment:
+      NIMBUS_BASE_URL: http://gateway:8080
+      NIMBUS_WEBHOOK_CONTROL_URL: http://webhook:9080
+      NIMBUS_WEBHOOK_DELIVERY_URL: http://webhook:9080
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+networks:
+  default:
+    # Standard bridge supports loopback publishing; outbound access is not blocked.
+    driver: bridge
 
 volumes:
-  postgres_data:
-  redis_data:
+  postgres_demo_data:
+  redis_demo_data:

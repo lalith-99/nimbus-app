@@ -248,8 +248,8 @@ const stuckProcessingTimeout = 5 * time.Minute
 // The naive approach — SELECT pending rows, then UPDATE them to 'processing'
 // in a second statement — has a race window. With N worker replicas polling
 // concurrently, two workers can SELECT the *same* rows before either UPDATEs,
-// and both will send the notification. That breaks our "exactly-once-effect"
-// guarantee and spams users with duplicates.
+// and both can send the notification. Combining selection and the state change
+// removes that claim race; it does not make external delivery atomic with the DB.
 //
 // THE FIX:
 // We do the claim in ONE atomic statement using `FOR UPDATE SKIP LOCKED`:
@@ -262,15 +262,17 @@ const stuckProcessingTimeout = 5 * time.Minute
 //	  - SKIP LOCKED tells Postgres: if a row is already locked by another worker,
 //	    skip it instead of blocking. So each worker gets a DISJOINT set of rows.
 //
-// This is the canonical "queue on top of Postgres" pattern — the same approach
-// used by libraries like Que, GoodJob, and River. No external queue needed for
-// correctness; SQS becomes an optional fan-out, not the source of truth.
+// The notification row acts as a database-backed work queue. An optional SQS
+// message prompts a claim, but the row remains the source of pending work.
 //
 // CRASH RECOVERY:
 // We also reclaim rows stuck in 'processing' longer than stuckProcessingTimeout.
 // If a worker crashes mid-send, its row would otherwise be orphaned forever
-// (the old query only looked at status='pending'). This makes the system
-// self-healing: a crashed worker's in-flight work is picked up by a healthy one.
+// (the old query only looked at status='pending'). Reclamation allows another
+// worker to retry. If the provider already accepted a send before the crash or
+// before a failed status write, that retry can duplicate the external effect.
+// A live but slow worker can also exceed the timeout; no fencing token is sent
+// to the provider, so stale-claim recovery is not an exactly-once guarantee.
 //
 // Interview talking point:
 // "The single biggest correctness bug in a multi-replica queue worker is the
@@ -335,12 +337,12 @@ func (r *Repository) ClaimPendingNotifications(ctx context.Context, limit int) (
 // ClaimNotificationByID atomically claims a SINGLE notification by id, marking it
 // 'processing'. This is the entry point for the SQS-driven hot path.
 //
-// WHY IT EXISTS (the no-double-send guarantee):
-// We run TWO delivery paths — the SQS consumer (fast, event-driven) and the DB
-// poller (slow reconciliation backstop). Both must never send the same row. The
-// claim is the single source of dedup truth: whichever path wins the atomic
-// UPDATE gets the row; the loser sees zero rows and skips. This is the same
-// `FOR UPDATE SKIP LOCKED` discipline as the batch claim, scoped to one id.
+// WHY IT EXISTS (claim coordination):
+// Both the SQS consumer and the DB poller claim through the notification row.
+// This conditional UPDATE marks an eligible row as processing. A competing
+// claim that finds the row no longer eligible returns no rows. Unlike the batch
+// query, this statement does not use SKIP LOCKED. Claims coordinate active work;
+// they cannot prevent every duplicate provider effect after a crash or timeout.
 //
 // It returns (nil, nil) — NOT an error — when the row is not claimable, i.e.:
 //   - already 'sent' / 'dead_lettered' (a duplicate SQS redelivery), or

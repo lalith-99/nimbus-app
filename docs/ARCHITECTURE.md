@@ -1,7 +1,7 @@
 # Nimbus — Architecture Deep Dive
 
-> A multi-tenant **notification orchestration platform** written in Go. It accepts notification
-> requests over REST and gRPC, durably persists them, and delivers them across **email, SMS, and
+> A personal **notification service project** written in Go. It accepts notification
+> requests over REST and gRPC, persists them in PostgreSQL, and dispatches them across **email, SMS, and
 > webhook** channels with retries, dead-lettering, idempotency, rate limiting, circuit breaking,
 > and an optional **AI/RAG** layer for natural-language operations.
 
@@ -21,7 +21,7 @@ design guide** — every major decision includes the *why* and the *tradeoff*, n
 4. [C4 Level 3 — Internal Components](#4-c4-level-3--internal-components)
 5. [Data Model (ERD)](#5-data-model-erd)
 6. [Request Lifecycle — Create a Notification](#6-request-lifecycle--create-a-notification)
-7. [The Background Worker](#7-the-background-worker)
+7. [Delivery: the hybrid worker](#7-delivery-the-hybrid-worker)
 8. [Notification State Machine](#8-notification-state-machine)
 9. [Reliability Patterns](#9-reliability-patterns)
 10. [gRPC & Server-Streaming](#10-grpc--server-streaming)
@@ -36,19 +36,20 @@ design guide** — every major decision includes the *why* and the *tradeoff*, n
 
 ## 1. System at a Glance
 
-Nimbus solves one hard problem well: **"accept a notification request and guarantee it is
-eventually delivered exactly once (or explicitly dead-lettered), across multiple channels, for
-thousands of independent tenants."**
+Nimbus separates **accepting a notification** from **attempting delivery**. An accepted request
+has a row in PostgreSQL; workers attempt delivery and record its status, schedule a retry, or move
+it to the database dead-letter queue. This is a project implementation, not a claim of measured
+production volume or a delivery SLA.
 
 | Concern | How Nimbus handles it |
 |---|---|
-| **Durability** | Every request is written to Postgres *before* we acknowledge the client (transactional outbox). The DB is the single source of truth. |
-| **At-least-once delivery** | Two paths deliver pending rows: an event-driven SQS consumer (hot path) and a DB-poll worker (backstop). Both retry with exponential backoff until success or max attempts. |
-| **No duplicate sends across replicas or paths** | Every row is claimed with `FOR UPDATE SKIP LOCKED` before sending — the batch poller claims disjoint batches, the SQS consumer claims one row by id. Whichever path wins the atomic claim sends; the loser skips. |
-| **Idempotent writes** | Redis-backed idempotency keys collapse client retries into a single notification. |
-| **Fair multi-tenancy** | Sliding-window rate limiting per tenant; every query is tenant-scoped. |
+| **Durable acceptance** | A successful create response follows the Postgres insert. The notification row is both application state and pending work. |
+| **Bounded retries** | An optional SQS consumer and a DB-poll worker share dispatch logic. Failed attempts are scheduled again, up to the configured attempt limit, then dead-lettered when the outcome can be persisted. |
+| **Claim coordination** | The batch poller uses `FOR UPDATE SKIP LOCKED`; the SQS consumer uses a conditional update by ID. These coordinate active claims, but a provider-side effect and the DB status update are separate operations. Duplicate delivery remains possible. |
+| **Request deduplication** | The REST path uses Redis reservations and cached responses within a TTL. This protection is unavailable when Redis is unavailable and is not a durable uniqueness constraint. |
+| **Tenant identifiers** | Rows and Redis keys carry tenant IDs. gRPC validates tenant ownership; the REST routes do not provide the same authentication boundary. The REST rate limiter uses a supplied tenant header or query parameter. |
 | **Downstream resilience** | Each channel sender is wrapped in a circuit breaker that fails fast when a provider is down. |
-| **Poison-message safety** | After N failures a notification moves to a Dead Letter Queue for inspection / manual retry. |
+| **Dead-letter recovery** | On reaching the attempt limit, the dispatcher moves the notification to a database dead-letter table for inspection, retry, or discard. |
 | **Observability** | Prometheus metrics, structured zap logs, health + circuit-status endpoints. |
 | **Operability via natural language** | Optional AI compose endpoint + a RAG pipeline that answers questions grounded in your own data. |
 
@@ -90,17 +91,18 @@ graph TB
     nimbus -->|"compose / embed / answer"| openai
 ```
 
-**Design note:** REST is the public front door for external clients; gRPC is the internal
-hallway between our own services. Same business logic, two transports chosen per audience —
-JSON for ubiquity, Protobuf for typing, binary efficiency, and streaming.
+**Design note:** REST provides JSON endpoints; gRPC provides typed RPCs and streaming. Both write
+to the same repository and use the same background delivery paths. Their middleware differs:
+gRPC has token-to-tenant authentication; Redis request deduplication and rate limiting are wired
+into REST. The REST interface needs authentication and authorization before untrusted exposure.
 
 ---
 
 ## 3. C4 Level 2 — Container View
 
 Zooming in: the deployable units and the stateful systems they depend on. The API process and the
-worker run **in the same binary today** (a goroutine) but are designed to split into independent
-deployments without code changes.
+worker run **in the same binary today** as goroutines. Splitting them into independent deployments
+would require separate startup configuration or entry points.
 
 ```mermaid
 graph TB
@@ -147,11 +149,15 @@ graph TB
     http -->|/metrics| client
 ```
 
-**Key insight (transactional outbox + hybrid delivery):** the HTTP handler writes the durable
-Postgres row first, then enqueues to SQS. The **SQS consumer** picks it up in milliseconds (hot path),
-while the **DB-poll worker** runs as a slower reconciliation backstop. Both claim the row atomically
-in Postgres before sending, so they never double-send. If SQS is down we still return `201` and the
-poller delivers it — **SQS accelerates delivery but is never a hard dependency.**
+**Key insight (database-backed work queue):** the HTTP handler writes the Postgres row first,
+then attempts an SQS enqueue when configured. The enqueue call is synchronous; it can add response
+latency, but an enqueue error is logged rather than changing the successful insert into an HTTP
+error. The DB-poll worker can claim due rows without an SQS message. SQS provides an event-driven
+pickup path; measured pickup latency depends on the workload and environment.
+
+Both delivery paths coordinate through database claims. This prevents a straightforward
+read-then-write claim race, but does not make a provider send and its database status update atomic.
+The crash window is explained in [section 7](#the-external-side-effect-boundary).
 
 ---
 
@@ -207,7 +213,8 @@ segregation — it keeps packages loosely coupled and trivially mockable in test
 
 ## 5. Data Model (ERD)
 
-Three tables carry the system. All are tenant-scoped.
+Three tables carry the system. Each has a tenant identifier; that data model alone does not
+enforce authorization on every endpoint.
 
 ```mermaid
 erDiagram
@@ -266,75 +273,57 @@ erDiagram
 
 ## 6. Request Lifecycle — Create a Notification
 
-The most important flow in the system. Note where durability is established and where idempotency
-and rate limiting intercept.
+This diagram follows a new valid REST request with no cached idempotency result. Rate limiting
+and request deduplication apply when their Redis services are configured; a cached request can
+return earlier without creating another row.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as Client
-    participant MW as Rate-Limit MW
     participant H as API Handler
     participant R as Redis
     participant DB as Postgres
     participant Q as SQS
-    participant W as Worker
-
-    C->>MW: POST /v1/notifications
-    MW->>R: ZADD sliding window (tenant)
-    alt over limit
-        MW-->>C: 429 Too Many Requests
-    end
-    MW->>H: forward
-
-    H->>H: validate (UUIDs, channel, JSON)
-    H->>R: CheckOrReserve(idempotency key)
-    alt key already completed
-        R-->>H: cached result
-        H-->>C: 201 (X-Idempotency-Replayed: true)
-    else key in-flight
-        R-->>H: ErrDuplicateRequest
-        H-->>C: 409 Conflict
-    end
-
+    C->>H: POST /v1/notifications
+    H->>R: Check rate limit when tenant key is supplied
+    H->>H: Validate UUIDs, channel, JSON
+    H->>R: CheckOrReserve idempotency key
     H->>DB: INSERT notification (status=pending)
-    Note over DB: Durable source of truth ✔
     alt insert fails
         H->>R: Release(key)
         H-->>C: 500
+    else insert succeeds
+        H->>R: Store idempotency result
+        opt SQS producer configured
+            H->>Q: Enqueue (synchronous call)
+            Q-->>H: Message ID or error
+            Note over H: Log enqueue errors; keep the stored row
+        end
+        H-->>C: 201 Created with notification ID
     end
-
-    H->>R: Store(idempotency result)
-    H-)Q: Enqueue (non-blocking)
-    H-->>C: 201 Created {id}
-
-    Note over W,DB: ...asynchronously (two paths, one claim guard)...
-    Q-)W: SQS consumer receives (hot path)
-    W->>DB: ClaimNotificationByID (atomic)
-    W->>W: deliver via channel sender
-    Note over W,DB: DB-poll worker (backstop) claims anything SQS missed
+    Note over DB: Background delivery uses the persisted row
 ```
 
 **Three key properties of this flow:**
 
-1. **Durability boundary:** we return `201` only after the Postgres `INSERT`. The client's
-   acknowledgement is a promise we can keep even if everything downstream crashes.
+1. **Acceptance boundary:** `201` means the Postgres insert succeeded. It does not mean the
+   destination received the notification; storage availability and worker progress still matter.
 2. **Idempotency release on failure:** if the DB write fails *after* we reserved the key, we
    `Release()` it so the client's retry isn't poisoned with a false `409` for 5 minutes.
-3. **Non-blocking enqueue:** the `-)` (async) arrow to SQS never blocks the response and never fails
-   the request. The SQS consumer delivers on the hot path; if the enqueue or SQS itself is down, the
-   DB-poll backstop still delivers the durable row.
+3. **Best-effort enqueue:** the handler waits for the SQS call, then returns `201` even if that
+   call failed. The stored pending row remains available to the DB poller. gRPC creates write to
+   the database and rely on the poller rather than calling this REST enqueue path.
 
 ---
 
 ## 7. Delivery: the hybrid worker
 
-Delivery runs on **two paths that share one atomic claim guard**, so they can run concurrently
-without ever double-sending:
+Delivery runs on **two paths that coordinate through the notification row**:
 
 | Path | Trigger | Claim | Role |
 |---|---|---|---|
-| **SQS consumer** | message received (long-poll) | `ClaimNotificationByID` (one row) | Hot path — sub-second dispatch |
+| **SQS consumer** | message received (long-poll) | `ClaimNotificationByID` (one row) | Event-driven pickup when SQS is configured |
 | **DB-poll worker** | ticker (30s when SQS is on, else 5s) | `ClaimPendingNotifications` (batch, SKIP LOCKED) | Reconciliation backstop — delayed retries + anything SQS dropped |
 
 Both paths hand the claimed row to the **same `Dispatcher`**, so send / retry / dead-letter behavior
@@ -365,10 +354,11 @@ flowchart TD
     retryq -->|no| dlq["MoveToDeadLetter (txn):<br/>1. INSERT dlq row<br/>2. status = dead_lettered"]
 ```
 
-> **Why the poller stays as a backstop:** an SQS message is one-shot. After the first attempt the
-> consumer always acks it. If the send failed but has retries left, `Dispatch` schedules the row back
-> to `pending` with a future `next_retry_at` — and the DB poller picks it up when due. The poller also
-> catches any message SQS ever drops. Fast path for the common case, durable path for correctness.
+> **Why the poller stays as a backstop:** after dispatching a claimed row, the consumer attempts
+> to delete the SQS message. If a send fails with attempts remaining, the dispatcher schedules
+> the row as `pending` with a future `next_retry_at`; the DB poller handles that retry. A database
+> claim error leaves the SQS message unacknowledged. The poller also finds pending rows whose
+> SQS enqueue failed. SQS messages can be redelivered; the notification row remains authoritative.
 
 ### The atomic claim — the heart of horizontal scalability
 
@@ -381,55 +371,64 @@ WHERE id IN (
        OR (status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes') -- reclaim stuck rows
     ORDER BY created_at
     LIMIT $1
-    FOR UPDATE SKIP LOCKED          -- ⚡ the magic
+    FOR UPDATE SKIP LOCKED
 )
 RETURNING ...;
 ```
 
-- **`FOR UPDATE SKIP LOCKED`** lets N worker replicas pull **disjoint** batches concurrently with
-  zero coordination — no Redis lock, no leader election. Postgres is the coordinator.
+- **`FOR UPDATE SKIP LOCKED`** coordinates concurrent batch claims through PostgreSQL row locks;
+  no separate Redis lock or leader election is used for this operation.
 - **Stuck-row reclamation:** if a worker crashes mid-send, its row is stranded in `processing`.
-  The `OR processing older than 5m` clause lets a healthy worker reclaim it — self-healing, no
-  manual intervention.
-- **Claim = mark processing in one statement:** there's no read-then-write race window, so the
-  same row can never be sent twice by two replicas.
+  The `OR processing older than 5m` clause makes it eligible for reclamation. A slow, live worker
+  can also exceed that timeout; there is no fencing token on an external provider send.
+- **Claim and mark in one statement:** the batch query closes the separate select/update race.
+  `ClaimNotificationByID` uses a conditional update to claim one eligible row for the SQS path.
 
-**Design note:** This is a database-as-queue pattern. Exactly-once-ish claiming comes for free
-from Postgres' row locking, which removes an entire class of distributed-locking bugs. The same
-claim guard, scoped to a single id (`ClaimNotificationByID`), is what lets the SQS consumer run as a
-parallel hot path without risking a double-send against the poller.
+### The external side-effect boundary
+
+A database claim coordinates work; it does not make delivery atomic with PostgreSQL. A provider
+may accept a send and then the worker can crash, or its `sent` status write can fail. The database
+still shows `processing`, so a later reclamation can send again. A provider timeout can similarly
+leave an ambiguous outcome. The dispatcher currently ignores errors from ordinary status-update
+calls, which also means persisted attempt counts can lag the actual number of attempts.
+
+The intended flow is therefore **durable acceptance with retryable delivery attempts**, not an
+exactly-once external effect or an unconditional eventual-delivery guarantee. The configured
+attempt limit bounds the normal recorded retry flow; persistent storage failures can interrupt
+that accounting. Receiver-side deduplication using a stable notification ID, or provider-supported
+idempotency, would be needed to address duplicate effects. The webhook sender includes
+`X-Nimbus-Notification-ID`; accepting that header is not itself deduplication.
 
 ---
 
 ## 8. Notification State Machine
 
-Every notification walks this graph. Terminal states are `sent`, `dead_lettered`, and `discarded`.
+This graph describes the normal worker transitions on the **notification row**, once outcome
+writes succeed. The dead-letter item has its own status (`pending`, `retried`, or `discarded`).
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: API/gRPC create
     pending --> processing: claimed (SQS consumer or poll, atomic)
-    processing --> sent: delivery ok
+    processing --> sent: provider accepted and status persisted
     processing --> pending: delivery failed, attempt < 5 (backoff)
     processing --> dead_lettered: delivery failed, attempt = 5
-    processing --> pending: worker crashed (reclaimed after 5m)
-
-    dead_lettered --> pending: operator retry (new notification)
-    dead_lettered --> discarded: operator discard
-
+    processing --> processing: stale claim reclaimed after 5m
     sent --> [*]
-    discarded --> [*]
+    dead_lettered --> [*]
 ```
 
-The retry edge `processing → pending` carries an **exponential-ish backoff** (`1m, 5m, 15m`,
-capped) stamped into `next_retry_at`, so the worker won't re-pick the row until the delay elapses.
+The retry edge `processing → pending` uses scheduled delays of `1m, 5m, 15m`, capped at 15 minutes,
+recorded in `next_retry_at`. A due row must still wait for a poll and available worker capacity.
+An operator retry creates a **new** notification and marks the DLQ item `retried`; discard marks
+the DLQ item `discarded`. Neither operation changes the original notification back to `pending`.
 
 ---
 
 ## 9. Reliability Patterns
 
-Nimbus stacks four independent safety mechanisms. Each is small; together they make the system
-production-grade.
+Nimbus combines four reliability mechanisms. Their implementation limits matter when deciding
+what workloads and failure cases the project can support.
 
 ### 9.1 Idempotency (Redis)
 
@@ -456,15 +455,22 @@ sequenceDiagram
 
 - **Auto keys (5 min TTL):** if the client sends no key, we hash `tenant|user|channel|payload`.
   This catches accidental network retries without blocking intentional re-sends.
-- **Client keys (24 h TTL):** explicit `Idempotency-Key` header → Stripe-style strong dedup.
+- **Client keys (24 h TTL):** an explicit `Idempotency-Key` header retains the cached result longer.
 - **Compare-and-delete release:** `Release()` only deletes the key if it's still the `processing`
-  marker (Lua CAS), so it can never clobber a stored result.
+  marker (Lua comparison), rather than deleting a stored successful response.
+
+This is REST request deduplication, not provider-side delivery deduplication. Redis failures are
+handled by continuing without protection. The Redis reservation/result and the Postgres insert
+are not one transaction; a crash after insertion but before result caching can leave an ambiguous
+client retry. Expired keys permit new requests. gRPC does not use this REST idempotency service.
 
 ### 9.2 Sliding-Window Rate Limiting (Redis Sorted Sets)
 
-Per-tenant **100 req/min**. We store request timestamps in a `ZSET`, trim everything older than the
-window with `ZREMRANGEBYSCORE`, then `ZCARD` to count. Unlike a fixed window, this has **no
-burst-at-boundary** problem — a true rolling 60-second view.
+The default is **100 requests per rolling minute** for the tenant key taken from `X-Tenant-ID`
+or the `tenant_id` query parameter. Requests without that key skip the limiter. Timestamps are
+stored in a `ZSET`, old entries are trimmed with `ZREMRANGEBYSCORE`, and `ZCARD` counts the window.
+The current check and insertion use separate Redis pipelines, so concurrent requests can exceed
+the configured limit. A pipeline is not an atomic check-and-add operation.
 
 ### 9.3 Circuit Breaker (per channel)
 
@@ -482,14 +488,17 @@ stateDiagram-v2
     end note
 ```
 
-Each sender (SES / SNS / webhook) gets its own breaker, so an SMS outage never blocks email.
-`GET /v1/health/circuits` exposes live state; `POST /v1/admin/circuits/{name}/reset` forces a probe.
+Each sender (SES / SNS / webhook) has its own breaker state. This limits repeated calls to a
+failing provider, although channels still share worker resources. `GET /v1/health/circuits`
+exposes state; `POST /v1/admin/circuits/{name}/reset` resets the selected breaker.
 
 ### 9.4 Dead Letter Queue
 
-After 5 failed attempts a notification is moved to `dead_letter_notifications` **inside a
-transaction** (insert DLQ row + flip source status atomically). Operators can inspect, **retry**
-(creates a fresh notification), or **discard** via the `/v1/dlq` endpoints.
+When the normal retry flow reaches the configured attempt limit (5 in the gateway), the dispatcher
+attempts to move the notification to `dead_letter_notifications` **inside a transaction**: insert
+the DLQ row and update the source status together. If that transaction fails, the original row
+remains eligible for later stale-claim recovery. Operators can inspect, **retry** (create a fresh
+notification), or **discard** via `/v1/dlq` endpoints.
 
 ---
 
@@ -521,11 +530,12 @@ sequenceDiagram
     G-->>S: close stream (sent/failed/dead_lettered)
 ```
 
-**Why streaming beats polling:** client-side polling fires *one request per interval* regardless of
-whether anything changed. Server-streaming inverts control — **one** request, the server pushes only
-the cadence it chooses. On a 100K-events/day system that eliminates thousands of redundant requests.
+**Streaming tradeoff:** the client keeps one RPC open for delivery updates instead of repeatedly
+making get requests. The server still polls the database every two seconds for each active
+stream. There is no measured request-reduction percentage or supported concurrent-stream count
+published here; both client traffic and database polling load belong in a workload-specific test.
 
-**Security (IDOR defense):** the tenant is taken from the **authenticated token**, never the request
+**gRPC authorization:** the tenant is taken from the **authenticated token**, rather than the request
 body. Cross-tenant reads return `NOT_FOUND` (not `PERMISSION_DENIED`) so an attacker can't use the
 error to discover which IDs exist. This maps to **OWASP API1: Broken Object Level Authorization**.
 
@@ -536,16 +546,18 @@ error to discover which IDs exist. This maps to **OWASP API1: Broken Object Leve
 Optional (enabled when `OPENAI_API_KEY` is set). Two capabilities:
 
 1. **Compose** (`POST /v1/ai/compose`) — natural language → notifications via LLM function calling.
-2. **Ask** (`POST /v1/ai/ask`) — a full **Retrieval-Augmented Generation** pipeline that answers
-   questions grounded in the tenant's own notification history, with citations.
+2. **Ask** (`POST /v1/ai/ask`) — a **Retrieval-Augmented Generation** pipeline that retrieves
+   tenant-filtered documents from `knowledge_base` and requests an answer with source references.
+   Indexing helpers exist, but successful delivery does not automatically call them in the
+   current dispatcher; the knowledge base must be populated separately.
 
 ```mermaid
-flowchart LR
+flowchart TD
     q["User query"] --> guard1["1. Injection guard<br/>(regex, fail fast)"]
     guard1 --> mask["2. PII mask<br/>email/phone/SSN → tokens"]
     mask --> embed["3. Embed<br/>text-embedding-3-small (1536-d)"]
     embed --> hybrid["4. Hybrid search<br/>vector + full-text → RRF (k=60)<br/>top-20 candidates"]
-    hybrid --> rerank["5. Rerank<br/>cross-encoder → top-5"]
+    hybrid --> rerank["5. Rerank<br/>lexical scoring → top-5"]
     rerank --> prompt["6. Build prompt<br/>numbered context 1..5 + question"]
     prompt --> llm["7. LLM answer<br/>system prompt pinned"]
     llm --> restore["8. Restore PII<br/>tokens → real values"]
@@ -554,16 +566,19 @@ flowchart LR
 
 **Design highlights:**
 
-- **Hybrid retrieval + Reciprocal Rank Fusion:** vector search nails *semantic* matches; full-text
-  (BM25-style) nails *exact keyword* matches. RRF fuses them by **rank position**
+- **Hybrid retrieval + Reciprocal Rank Fusion:** vector similarity and PostgreSQL full-text search
+  produce separate rankings. RRF combines them by **rank position**
   ($\text{score}(d) = \sum_i \frac{1}{k + \text{rank}_i(d)}$, $k=60$) so we never need the two systems
-  to share a score scale. Best of both, in one SQL query.
-- **Two-stage retrieval (recall → precision):** cheap hybrid search casts a wide net (top-20), then
-  a more expensive reranker picks the precise top-5. Standard IR pattern.
+  to share a score scale.
+- **Two-stage retrieval:** hybrid search returns candidates and a local lexical reranker selects
+  up to five. Retrieval quality needs evaluation on representative questions; this is not a
+  measured accuracy claim or a neural cross-encoder implementation.
 - **Defense in depth:** a regex guard *and* a pinned system prompt. Even if an injection slips past
-  the guard, the system prompt instructs the model to ignore instruction-overrides.
-- **PII never reaches OpenAI:** masking happens *before* the embedding and chat calls; real values
-  are restored only in the final local response.
+  the guard, the system prompt instructs the model to ignore instruction-overrides. These are
+  mitigations, not proof that prompt injection is prevented.
+- **Query masking:** selected patterns in the query are masked before embedding and generation.
+  Retrieved document content is also included in the prompt and is not covered by that query-only
+  masking step; this does not establish that no sensitive data reaches the external API.
 - **pgvector over a dedicated vector DB:** we already run Postgres, so we get ACID, one backup
   strategy, and the ability to JOIN vectors with relational data — zero new infrastructure.
 
@@ -571,8 +586,10 @@ flowchart LR
 
 ## 12. Deployment Topology (AWS)
 
-Provisioned with **Terraform** (`/terraform`). Production target is **ECS Fargate** behind an ALB,
-with managed Postgres, Redis, and SQS.
+The **Terraform definitions** (`/terraform`) target **ECS Fargate** behind an ALB, with managed
+Postgres, Redis, and SQS. This diagram describes those definitions, not an active hosted demo.
+The checked-in GitHub Actions workflow currently disables AWS image-publish, migration, and
+deployment jobs; its test and build jobs remain enabled.
 
 ```mermaid
 graph TB
@@ -605,45 +622,50 @@ graph TB
     ecr -.->|image pull| ecs1 & ecs2
 ```
 
-- **Migrations** run as a separate one-shot ECS task from a dedicated `migrator` image — schema
-  changes are decoupled from app rollout.
-- **Secrets** (DB password, connection string) live in **Secrets Manager**, injected as env vars —
-  never baked into images or Terraform state in plaintext.
-- CI/CD via **GitHub Actions** (`.github/`) builds, tests, pushes to ECR, and updates the service.
+- **Migrations** have a separate ECS task definition and `migrator` image.
+- **Secrets** are referenced from Secrets Manager in task definitions. Terraform state can still
+  contain values managed by Terraform, so the definitions do not eliminate state-security concerns.
+- **GitHub Actions** (`.github/`) runs Go tests and builds the binary. The disabled AWS jobs show
+  the deployment workflow; they do not demonstrate a currently running service.
 
 ---
 
 ## 13. Scaling & Capacity Planning
 
-| Dimension | Current | How it scales |
+| Dimension | Current implementation | What to evaluate before scaling |
 |---|---|---|
-| **API throughput** | 1 task | Stateless → add ECS tasks behind the ALB. |
-| **Delivery throughput** | in-process SQS consumer (N receivers × batch-of-10) + poll worker | Raise `Receivers`/`Concurrency`, or split delivery into its own deployment; `SKIP LOCKED` + per-id claim mean N nodes need **zero** coordination. |
-| **Write durability** | single RDS | Multi-AZ failover; read replicas for list endpoints. |
-| **Rate-limit / idempotency** | single Redis | Cluster mode; keys are already namespaced by tenant. |
-| **Vector search** | HNSW in Postgres | Good to ~tens of millions of vectors before a dedicated ANN store is warranted. |
+| **API throughput** | HTTP and gRPC share a process and database pool | Measure database latency, pool pressure, payload sizes, and downstream enqueue time before adding replicas. |
+| **Delivery throughput** | SQS receive loops plus a sequential batch poller | Measure provider latency, quotas, retry load, and claim contention. Increasing concurrency also increases pressure on shared dependencies. |
+| **Database** | PostgreSQL stores pending work and outcomes | Measure claim/update queries and backlog age; evaluate availability and retention requirements. |
+| **Rate-limit / idempotency** | Tenant-keyed Redis data | Address concurrent rate-limit checks and fail-open behavior before claiming strict distributed enforcement. |
+| **Vector search** | HNSW and full-text indexes in PostgreSQL | Benchmark the actual corpus, recall target, vector dimensions, and memory budget. No fixed vector-count ceiling is established here. |
 
-**Back-of-envelope:** at **10M notifications/day ≈ 116/sec average** (higher in bursts). The SQS
-consumer defaults — 3 receivers pulling batches of 10, up to 10 concurrent sends each — absorb that
-with large headroom, and the DB-poll backstop (30s tick, 10 rows/batch) mops up delayed retries. Both
-levers scale horizontally well past 10M/day.
+**Illustrative workload math:** 100,000 notifications/day is about 1.16 requests/second on average;
+a hypothetical 10× burst is about 11.6/second. This converts a workload assumption into a rate,
+not measured Nimbus capacity. A reliable capacity result needs a reproducible workload,
+environment, duration, concurrency, latency percentiles, error counts, and observed backlog.
+
+The tests in `internal/sqs/producer_bench_test.go` measure local message construction and JSON
+serialization. They exclude the HTTP path, database writes, Redis, AWS transport, and provider
+delivery. Optional local-emulator timing is also not a production AWS SLA.
 
 ---
 
 ## 14. Failure Modes & Mitigations
 
-| Failure | Blast radius | Mitigation |
+| Failure | Effect | Handling and remaining limit |
 |---|---|---|
-| SQS unavailable | none (slower) | Enqueue is non-blocking; the DB-poll backstop still delivers every row. |
+| SQS unavailable | REST enqueue call can add latency; event-driven pickup unavailable | Enqueue errors are logged; the DB poller can claim stored due rows, subject to worker capacity and database/provider availability. |
 | Redis unavailable | degraded | Idempotency + rate limiting disabled, requests still served (logged warn). |
-| A provider (e.g. SES) down | that channel only | Circuit breaker opens → fail fast → retries/DLQ; other channels unaffected. |
-| Worker/consumer crash mid-send | one batch/message | Row stuck in `processing` is reclaimed after 5 min; unacked SQS messages reappear after the visibility timeout. |
+| A provider (e.g. SES) down | Failed attempts and shared worker pressure | Per-channel breaker state reduces repeated calls; bounded retries can end in DLQ. |
+| Worker/consumer crash mid-send | Delivery outcome may be ambiguous | A row in `processing` is reclaimable after 5 minutes. A provider may already have accepted the first send, so reclamation can duplicate the effect. |
 | SQS redelivers an already-sent message | none | `ClaimNotificationByID` returns "not claimable"; the consumer just acks — no re-send. |
-| Poison message (always fails) | one notification | Moves to DLQ after 5 attempts; never blocks the queue. |
-| Duplicate client retry | none | Idempotency key collapses it to one notification. |
-| Two workers/paths, same row | none | Atomic claim (`FOR UPDATE SKIP LOCKED` / claim-by-id) guarantees a single winner. |
-| Prompt injection (AI) | none | Regex guard + pinned system prompt (defense in depth). |
-| PII leak to OpenAI | none | Masked before any external API call. |
+| Poison notification (always fails) | Repeated failed attempts | Moves to DLQ after the normal recorded attempt limit if the transaction succeeds. |
+| Duplicate REST client request | May create another row if protection is unavailable | Redis reservations/cached results cover a TTL; Redis failure, expiry, and DB/cache crash gaps remain. |
+| Concurrent delivery paths | Both may attempt a claim | Database claims coordinate active work; stale reclamation and external sends still need duplicate-effect handling. |
+| Outcome write fails | Status/attempt count can lag the external action | The dispatcher currently ignores ordinary status-write errors; stale recovery may reattempt the send. |
+| Prompt injection (AI) | Model output may be affected | Regex checks and instructions are mitigations, not a complete defense. |
+| Sensitive retrieved content | Content may be sent to the external API | Query masking does not sanitize every retrieved document. |
 
 ---
 
@@ -653,16 +675,16 @@ levers scale horizontally well past 10M/day.
 
 | Decision | Why | Tradeoff we accepted |
 |---|---|---|
-| **Transactional outbox** (DB first, then enqueue) | Durability without a distributed transaction across DB + queue | Delivery is eventually-consistent, not inline |
-| **Hybrid delivery** (SQS consumer hot path + DB-poll backstop, one claim guard) | Sub-second dispatch *and* guaranteed delivery even if SQS drops or is down | Two delivery paths to reason about (kept safe by the shared atomic claim) |
-| **DB-as-queue with `SKIP LOCKED`** | Exactly-once claiming, horizontal scaling, no extra infra | Backstop polling latency; not suited to millions of msgs/sec (we're far below that) |
+| **Durable row before enqueue** | Pending work survives a failed SQS enqueue without a DB/queue distributed transaction | HTTP still waits for the enqueue attempt; accepting work is separate from delivering it |
+| **SQS pickup plus DB polling** | Event-driven pickup and a path for due retries or missed enqueues | Two paths to coordinate; the poller must have enough capacity for the backlog |
+| **DB-as-queue with `SKIP LOCKED`** | Coordinates claims using existing PostgreSQL | Database work and polling overhead; claims do not remove the external-side-effect crash window |
 | **Two ports: REST :8080 + gRPC :9090** | Clean protocol separation; no h2c multiplexing complexity | Two listeners to operate |
 | **Per-channel circuit breakers** | Isolate provider failures | More breaker state to monitor |
-| **Idempotency in Redis, not DB unique constraint** | Sub-ms checks, TTL-based expiry, no schema bloat | Redis becomes a soft dependency (gracefully degraded) |
-| **pgvector, not Pinecone/Weaviate** | Zero new infra, ACID, JOIN vectors with relational data | ~10s-of-millions vector ceiling |
+| **Idempotency in Redis, not DB unique constraint** | Cached responses and TTL-based expiry | Fail-open behavior and a DB/cache consistency gap |
+| **pgvector, not a separate vector store** | Reuses PostgreSQL for vectors and relational data | Shares database resources; corpus-specific evaluation is needed |
 | **Hybrid search + RRF** | Robust across semantic *and* keyword queries | Slightly more complex SQL than pure-vector |
-| **Server-streaming gRPC for status** | ~90% fewer requests vs polling | gRPC-only feature (REST clients still poll) |
-| **`NOT_FOUND` on cross-tenant access** | No enumeration oracle (OWASP API1) | Slightly less precise error for legitimate 404s |
+| **Server-streaming gRPC for status** | One long-lived client RPC | The server still polls the DB per stream; REST clients use get requests |
+| **`NOT_FOUND` on cross-tenant gRPC access** | Avoids distinguishing another tenant's existing record | REST does not currently implement equivalent authorization |
 
 ---
 
@@ -670,19 +692,17 @@ levers scale horizontally well past 10M/day.
 
 The core principles that drive the system's design:
 
-- **The database is the source of truth and the queue.** Outbox pattern + `FOR UPDATE SKIP LOCKED`
-  gives durability and lock-free horizontal scaling in one move.
-- **SQS accelerates delivery but is never a hard dependency.** The consumer is the hot path; if it's
-  down, the DB poll backstop still delivers, and a write is never failed because a queue hiccupped.
-- **Idempotency is two-tier.** Auto content-hash keys (5 min) for accidental retries, explicit
-  client keys (24 h) for strong dedup — the same model Stripe uses.
-- **Sliding window, not fixed window.** Redis sorted sets eliminate the boundary-burst problem.
-- **Circuit breakers are per-channel.** A single provider outage can't cascade to the other channels.
-- **Crashes self-heal.** Stuck `processing` rows are reclaimed after 5 minutes.
-- **RAG is grounded and guarded.** Hybrid retrieval + RRF for relevance; regex guard + pinned
-  prompt + PII masking for safety; citations for verifiability.
-- **Security is tenant-from-token, never tenant-from-body.** Closes the IDOR hole and returns
-  `NOT_FOUND` to avoid leaking IDs.
+- **Persist work before attempting delivery.** PostgreSQL stores pending work and recorded outcomes.
+- **Keep a recovery path independent of SQS.** Polling finds due database rows even without a queue
+  message, while SQS provides an event-driven pickup path.
+- **Separate request deduplication from delivery effects.** Redis caching and database claims solve
+  different problems; neither makes an external send atomic with a status write.
+- **Make recovery limits explicit.** Stale claims can be reclaimed, but ambiguous provider outcomes
+  can duplicate effects and failed status writes can leave attempt accounting behind.
+- **Describe tenant boundaries by interface.** gRPC has token-based checks; REST needs equivalent
+  authentication and authorization before untrusted use.
+- **Measure before making capacity claims.** Local serialization benchmarks and hypothetical rate
+  calculations do not establish service throughput, latency, or an SLA.
 
 ---
 

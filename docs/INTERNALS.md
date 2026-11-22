@@ -272,17 +272,20 @@ if err := h.repo.CreateNotification(ctx, notif); err != nil {
 ```
 
 This single `INSERT` ([repository.CreateNotification](../internal/db/repository.go)) is the
-**durability boundary**. The moment it commits, the notification is safe — even if the process crashes
-one nanosecond later, the row is in Postgres and the worker will deliver it. *This is why we can
-honestly return `201` so quickly: we're not promising the email was sent, we're promising it's been
-durably recorded and will be.*
+**acceptance boundary**. Once it commits, the notification exists in Postgres even if the gateway
+process exits. Workers can later claim it and attempt delivery. `201` acknowledges the database
+insert; it does not promise a delivered email or a deadline. Storage availability, worker progress,
+provider behavior, and the configured retry limit still determine the outcome.
 
 Notice the `Release()` on the failure path. We took a lock in Step 2 (reserved the idempotency key).
 If the DB write fails, we must hand that lock back, or the key stays "in progress" for 5 minutes and
 the client's retry gets a false `409`. **Any lock you take, you release on every error path.** This is
 the kind of detail that separates a toy from a real service.
 
-### Step 4 — Enqueue to SQS (the hot path's trigger)
+### Step 4 — Cache the result, then attempt SQS enqueue
+
+The handler first stores the successful response under the Redis idempotency key when that
+service is configured. It then calls SQS when a producer is available:
 
 ```go
 if h.producer != nil {
@@ -293,28 +296,29 @@ if h.producer != nil {
 }
 ```
 
-Enqueuing to SQS is what lets the **SQS consumer** (§6) pick the work up in milliseconds instead of
-waiting for the next DB poll. But — and this is the heart of the outbox pattern — **the durable row in
-Step 3 is the source of truth.** If the enqueue fails (or SQS is down), we log a warning and still
-return `201`, because the DB-poll backstop (§6) will deliver it anyway. We never fail a write because
-a queue hiccupped, and we never treat the queue as a parallel truth.
+SQS gives the consumer (§6) an event-driven way to discover the work without waiting for the next
+database poll. **The stored row in Step 3 is the source of truth.** This call is synchronous and
+can add response latency. An enqueue failure is logged and the handler still returns `201`; the
+DB-poll worker can claim the pending row later. No pickup-latency measurement is implied.
 
-> **The "transactional outbox", finally named.** The classic distributed-systems bug is the
-> *dual write*: write to the DB **and** publish to a queue, as two separate operations. If the second
-> fails after the first succeeds, your DB and queue disagree forever. The outbox pattern avoids this:
-> write **only** to the DB; treat the DB row itself as the outgoing message; have a separate process
-> read the DB and forward to the queue/provider. Nimbus's worker *is* that process. SQS is downstream
-> of the truth, never a parallel truth.
+> **Database-backed work queue.** A database write and a queue publish can fail independently.
+> Nimbus stores the work in the notification row itself, and the worker can dispatch from that
+> row without an SQS message. This is an outbox-style recovery path, not an atomic DB/SQS write
+> or a promise of exactly-once provider effects.
 
-### Step 5 — Store result & respond
+### Step 5 — Respond
 
-We cache the response under the idempotency key (so a retry replays it) and return `201 {"id": …}`.
+After the optional enqueue attempt returns, the handler returns `201 {"id": …}`. A Redis cache
+failure does not roll back the Postgres insert. That separation, key expiry, and fail-open Redis
+behavior limit request deduplication; the gRPC create path does not use this Redis service.
 
 **Why / Alternatives / Tradeoff for the write path**
-- *Why:* durability + fast ack + dedup, with no dependency on the queue being up.
-- *Alternative:* send inline (rejected — §2). Or dual-write to DB+queue (rejected — split-brain).
-- *Tradeoff:* delivery is *eventually* done, not instant. For notifications, a few seconds of latency
-  is fine; in exchange we get reliability and the ability to retry.
+- *Why:* persist work before attempting delivery and retain a database recovery path for failed
+  queue enqueues.
+- *Alternative:* send to the provider inline, or require both database insertion and queue publish
+  to succeed without reconciliation.
+- *Tradeoff:* acceptance and delivery are separate. The API still waits for its optional enqueue
+  call, and background retries can end in DLQ rather than successful delivery.
 
 ---
 
@@ -325,7 +329,7 @@ Delivery runs on **two paths that share one atomic claim guard**, both started a
 
 | Path | Started as | Claim | Role |
 |---|---|---|---|
-| **SQS consumer** | `go sqsConsumer.Start(ctx)` | `ClaimNotificationByID` (one row) | Hot path — sub-second dispatch |
+| **SQS consumer** | `go sqsConsumer.Start(ctx)` | `ClaimNotificationByID` (one row) | Event-driven pickup when configured |
 | **DB-poll worker** | `go w.Start(ctx)` | `ClaimPendingNotifications` (batch) | Backstop — delayed retries + anything SQS dropped |
 
 The DB-poll worker's whole job is the loop in [worker.go](../internal/worker/worker.go). When SQS is
@@ -376,17 +380,17 @@ Two clauses make this work:
 - **`FOR UPDATE`** locks each selected row for the duration of the statement.
 - **`SKIP LOCKED`** says: *if a row is already locked by another transaction, don't wait — skip it.*
 
-Together they mean: when ten worker replicas run this simultaneously, Postgres hands each one a
-**disjoint** set of rows. No two workers ever claim the same notification, with **zero coordination**
-— no Redis lock, no leader election, no ZooKeeper. The database is the coordinator. This is the
-canonical "queue on top of Postgres" technique (the same approach used by job libraries like River,
-Que, and GoodJob).
+These operations coordinate concurrent batch claims using PostgreSQL row locks, without a
+separate Redis lock or leader election. They close the select-then-update race. They do not make
+an external provider send atomic with the later database update, and a stale row can be claimed
+again during recovery.
 
 **The crash-recovery clause.** The second half of the `WHERE` —
 `OR (status = 'processing' AND updated_at < NOW() - interval)` — reclaims rows stuck in `processing`
 for more than 5 minutes ([stuckProcessingTimeout](../internal/db/repository.go)). If a worker claims a
 row and then crashes mid-send, that row would otherwise be orphaned in `processing` forever. This
-clause lets a healthy worker pick it back up. **The system self-heals from worker crashes.**
+clause lets another worker try it again. A slow, live worker can also exceed the timeout; there is
+no provider-facing fencing token. Recovery can therefore duplicate an external effect.
 
 > One subtle, real bug that's already been fixed here: the interval is passed as
 > `$2 * INTERVAL '1 second'` with an integer number of seconds, *not* as Go's `Duration.String()`
@@ -416,8 +420,8 @@ if err != nil {
 - **Success** → `sent`. Done.
 - **Failure, tries left** → back to `pending`, but stamp `next_retry_at = now + backoff`. The claim
   query's `next_retry_at <= NOW()` check means the row won't be re-picked until the delay elapses.
-  Backoff is `1m → 5m → 15m` ([calculateNextRetry](../internal/worker/worker.go)) — **exponential
-  backoff** so a struggling provider isn't hammered.
+  Scheduled delays are `1m → 5m → 15m`, capped at 15 minutes
+  ([calculateNextRetry](../internal/worker/worker.go)); pickup also depends on polling and capacity.
 - **Failure, out of tries** → dead-letter it.
 
 The row was already marked `processing` by the atomic claim, so there's no separate "mark as
@@ -434,14 +438,16 @@ processes them concurrently (bounded by `Concurrency`). Per message it:
    claim. If the row is already `sent`, already claimed by the poller, or a retry that isn't due yet,
    the claim returns "not claimable" and the consumer simply **acks** the message (no re-send).
 3. On a winning claim, hands the row to the shared `Dispatcher`.
-4. **Always acks after the first attempt** (an SQS message is one-shot). If the send failed but has
-   retries left, `Dispatch` schedules it back to `pending` with a future `next_retry_at`, and the
-   **DB-poll backstop** picks it up when due.
+4. Attempts to acknowledge after dispatch. If the send failed but has attempts left, `Dispatch`
+   schedules the row as `pending` with a future `next_retry_at`; the DB poller handles that retry.
+   Failed acknowledgements can cause an SQS redelivery.
 
-> **The no-double-send guarantee.** Two delivery paths run concurrently, but the atomic DB claim is
-> the single source of dedup truth: whichever path wins the `pending → processing` transition sends
-> the row; the loser sees zero rows and skips. On a transient DB error the consumer does *not* ack, so
-> the message reappears after the SQS visibility timeout and is retried safely.
+> **Claim coordination is not delivery deduplication.** The two delivery paths coordinate through
+> database claims. On a claim error, the consumer does not acknowledge the message, allowing a
+> later SQS redelivery. If the provider accepts a send before a crash or failed `sent` update,
+> stale-row recovery can send it again. The dispatcher currently ignores ordinary status-write
+> errors, so recorded attempt counts can also lag actual attempts. Receiver/provider idempotency
+> would be needed to address duplicate external effects; the current claim alone does not.
 
 ### Dead-lettering is transactional
 
@@ -460,15 +466,15 @@ tx.Commit(ctx)
 the DLQ *and* still `processing` (so it'd get re-sent), or flipped to `dead_lettered` with no DLQ
 record (lost forever). The transaction makes the pair atomic: both happen or neither does. The
 `defer tx.Rollback` is a Go idiom — `Rollback` after a successful `Commit` is a harmless no-op, so
-this guarantees we never leak an open transaction on any error path.
+the deferred rollback closes an uncommitted transaction when the function returns.
 
 **Why / Alternatives / Tradeoff for delivery**
-- *Why hybrid:* the SQS consumer gives sub-second latency for the common case, while the DB-poll
-  backstop guarantees eventual delivery of retries and anything SQS drops — all deduped by one claim.
-- *Alternative:* Postgres `LISTEN/NOTIFY` (push instead of poll). Rejected because it needs a
-  dedicated, non-pooled DB connection per listener and doesn't survive reconnects gracefully.
-- *Tradeoff:* two delivery paths to reason about. The shared atomic claim keeps them safe, and the
-  poller interval is relaxed to 30s when SQS is carrying the load.
+- *Why hybrid:* SQS provides event-driven pickup; database polling handles due retries and pending
+  rows that have no SQS message.
+- *Alternative:* a shared Postgres `LISTEN/NOTIFY` listener with application-level fanout. It would
+  need reconnection handling and durable-state catch-up; a connection per client is not required.
+- *Tradeoff:* two paths to coordinate. Claiming limits an initial selection race, while provider
+  ambiguity, stale reclamation, status-write failures, and bounded retries still need consideration.
 
 ---
 
@@ -856,13 +862,10 @@ interesting one is *ask*, which is a **RAG** pipeline.
 
 ### What problem RAG solves
 
-An LLM like GPT only knows what it was trained on — public internet text up to some cutoff. It knows
-*nothing* about your notification history. If you ask it "did my order email to Alice get delivered?"
-it will *hallucinate* a confident, plausible, wrong answer.
-
-**RAG** (Retrieval-Augmented Generation) fixes this by *retrieving* the relevant facts from your data
-first, then handing them to the LLM as context with an instruction: "answer using only these
-documents." The answer becomes grounded and verifiable (with citations) instead of invented.
+An LLM does not have access to this application's notification history unless the application
+provides it. **RAG** (Retrieval-Augmented Generation) retrieves relevant stored documents and
+includes them in the model's context with instructions to cite them. This makes supporting
+material available to inspect; it does not eliminate retrieval errors or fabricated answers.
 
 ### What is an embedding / a vector?
 
@@ -877,8 +880,8 @@ extension, in the [knowledge_base](../migrations/003_add_pgvector.up.sql) table.
 
 A query flows through 8 steps:
 
-1. **Injection guard** — reject prompt-injection attempts (below).
-2. **PII mask** — replace emails/phones/SSNs with placeholders *before* anything leaves our process.
+1. **Injection guard** — reject queries matching selected suspicious patterns (below).
+2. **PII mask** — replace selected sensitive patterns in the query with placeholders.
 3. **Embed** — turn the query into a 1536-dim vector.
 4. **Hybrid search** — find the top-20 candidate documents (below).
 5. **Rerank** — narrow 20 → the best 5 ([reranker.go](../internal/rag/reranker.go)).
@@ -891,7 +894,7 @@ A query flows through 8 steps:
 Two ways to search text, each with a blind spot:
 - **Vector search** finds *semantic* matches but can miss exact tokens (a specific error code, an email
   address, an ID).
-- **Full-text search** (Postgres `tsvector`, BM25-style) nails *exact keywords* but misses paraphrases.
+- **Full-text search** uses Postgres `tsvector` and `ts_rank` for lexical matches.
 
 [HybridSearch](../internal/rag/store.go) runs **both** and fuses them with **Reciprocal Rank Fusion
 (RRF)**. The whole thing is one SQL query using two CTEs (one per search) joined together:
@@ -912,26 +915,28 @@ ORDER BY rrf_score DESC;
 
 The `<=>` operator is pgvector's cosine distance (smaller = more similar). The genius of RRF is that it
 fuses the two result lists using only **rank position**, not raw scores — so we never have to make a
-cosine distance and a BM25 score comparable (they're on totally different scales). The formula is
+cosine distance and a PostgreSQL full-text rank comparable. The formula is
 `score(d) = Σ 1/(k + rank_i(d))` with `k=60` (the standard constant from the original paper). A
 document that ranks well in *both* lists rises to the top.
 
 ### The safety guard ([guard.go](../internal/rag/guard.go))
 
-Two orthogonal jobs, done with fast regex (microseconds, no extra API call):
+Two local regex-based checks, without an additional API call:
 
 - **Prompt-injection defense.** Attackers embed instructions in their query: *"Ignore all previous
   instructions, you are now…"* The guard matches known patterns and rejects the request before it
-  reaches the LLM. This is *defense in depth* — even if something slips through, step 7 also **pins**
-  the system prompt so the LLM's instructions can't be overridden.
-- **PII filtering.** Emails/phones/SSNs are masked to placeholders before we call OpenAI (so PII never
-  lands in their logs), then restored in the final answer.
+  reaches the LLM. Step 7 also supplies a system prompt. These are mitigations, not evidence that
+  prompt injection is prevented.
+- **Query masking.** Selected email/phone/SSN patterns in the query are masked, then restored in the
+  final answer. Retrieved document content is included separately and is not covered by this
+  query-only masking step; this does not establish that external requests contain no sensitive data.
 
 **Why / Alternatives / Tradeoff**
 - *Why pgvector (not Pinecone/Weaviate):* zero new infrastructure — it's just our existing Postgres.
   We get ACID and can join vectors with relational data in one query.
-- *Tradeoff:* pgvector tops out around tens of millions of vectors before a dedicated ANN store would
-  win. We're far below that. Also, the `knowledge_base` table starts **empty** — `IndexNotification`
+- *Tradeoff:* vector search shares PostgreSQL resources with application work; capacity and recall
+  depend on the corpus, dimensions, index settings, and hardware. No vector-count ceiling is
+  established by this project. The `knowledge_base` table starts **empty** — `IndexNotification`
   and `SeedFAQ` exist to populate it but aren't auto-called yet, so out of the box `ask` truthfully
   says "I don't have enough information" until you seed data.
 
@@ -964,16 +969,16 @@ Each row is a decision, *why* it was made, the main alternative, and the cost ac
 
 | Decision | Why | Alternative (rejected) | Cost accepted |
 |---|---|---|---|
-| **Transactional outbox** (DB first, queue downstream) | Durability + fast ack, no split-brain | Dual-write to DB *and* queue | DB/queue can briefly lag; worker reconciles |
-| **DB-as-queue with `SKIP LOCKED`** | Exactly-once claim, horizontal scale, no extra infra | Dedicated broker (Kafka/SQS) as primary store | Throughput ceiling far below a real broker (fine for us) |
-| **Polling (5s) for the worker** | Simple, crash-tolerant, scales via `SKIP LOCKED` | `LISTEN/NOTIFY` push | Up to 5s pickup latency (SQS fast-path covers it) |
+| **Durable row before enqueue** | Retains pending work when SQS enqueue fails | Coupled database/queue writes without reconciliation | The handler waits for the optional enqueue; delivery is separate from acceptance |
+| **DB-as-queue with `SKIP LOCKED`** | Coordinates active claims using existing PostgreSQL | Dedicated broker as primary work store | Database contention and polling overhead; external-side-effect crash window remains |
+| **Polling for the worker** | Finds due retries and rows without queue messages | Shared `LISTEN/NOTIFY` listener | Poll interval plus backlog/processing time affects pickup; not a latency ceiling |
 | **Per-channel circuit breakers** | Isolate provider outages | Rely on timeouts/retries only | Some false rejections for ~30s while Open |
-| **Idempotency in Redis** | Sub-ms atomic `SETNX`, TTL auto-expiry | DB unique constraint | Redis is a soft dependency (degrades gracefully) |
-| **Sliding-window rate limit** | No boundary bursts | Fixed-window counter | A bit more Redis work per request |
+| **Idempotency in Redis** | Reservations and cached replies with TTL expiry | DB unique constraint | Redis failure/expiry and DB/cache gaps can permit another request |
+| **Sliding-window rate limit** | Counts a rolling time window | Fixed-window counter | Current separate check/add pipelines permit concurrent overshoot |
 | **REST + gRPC (two ports)** | Right tool per audience; streaming | One protocol for both | Two listeners to operate |
-| **Server-streaming for status** | ~Eliminates polling traffic | REST polling / WebSockets | gRPC-only; needs `grpcurl` to test |
-| **pgvector for RAG** | Zero new infra, ACID, SQL joins | Pinecone/Weaviate | ~10s-of-millions vector ceiling |
-| **Monolith with in-process worker** | One binary to deploy; simple | Separate API + worker services | Shared fate today (but worker is split-ready) |
+| **Server-streaming for status** | One long-lived client RPC | REST polling / WebSockets | The server still polls the database per stream |
+| **pgvector for RAG** | Reuses PostgreSQL for vectors and relational data | Separate vector store | Shared database resources; corpus-specific benchmarks are needed |
+| **Monolith with in-process worker** | One binary to deploy | Separate API + worker services | Shared process; independent deployment needs startup/configuration changes |
 | **`NOT_FOUND` on cross-tenant reads** | No "which IDs exist" oracle | `PERMISSION_DENIED` | Slightly less precise legit 404s |
 
 ---

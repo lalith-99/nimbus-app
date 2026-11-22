@@ -252,11 +252,11 @@ func run() error {
 	)
 
 	// ── SQS Consumer (event-driven hot path) ─────────────────────────────────
-	// When a queue is configured, the SQS consumer is the PRIMARY, low-latency
-	// delivery path: it long-polls, atomically claims each notification in the DB
-	// (the same no-double-send guard the poller uses), and dispatches via the SAME
-	// Dispatcher. The DB poller above remains as a reconciliation backstop that
-	// catches delayed retries and anything SQS ever drops.
+	// When a queue is configured, the SQS consumer provides event-driven pickup:
+	// it long-polls, claims eligible notification rows, and uses the same
+	// Dispatcher as the poller. Database claims coordinate active work but cannot
+	// make a provider send atomic with its status update; recovery can resend.
+	// The DB poller handles due retries and pending rows without an SQS message.
 	if cfg.SQSQueueURL != "" {
 		sqsConsumerTransport, cErr := sqs.NewConsumer(ctx, sqs.Config{
 			Region:   cfg.SQSRegion,
