@@ -62,7 +62,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"channel\": \"sms\",\n  \"payload\": {\n    \"phone\": \"+1234567890\",\n    \"message\": \"Your verification code is 123456\"\n  }\n}"
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"channel\": \"sms\",\n  \"payload\": {\n    \"phone_number\": \"+1234567890\",\n    \"message\": \"Your verification code is 123456\"\n  }\n}"
             },
             "url": {
               "raw": "{{base_url}}/v1/notifications",
@@ -85,7 +85,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"channel\": \"webhook\",\n  \"payload\": {\n    \"url\": \"https://api.example.com/webhook\",\n    \"method\": \"POST\",\n    \"body\": {\n      \"event\": \"user.created\",\n      \"user_id\": \"12345\"\n    }\n  }\n}"
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"user_id\": \"{{user_id}}\",\n  \"channel\": \"webhook\",\n  \"payload\": {\n    \"url\": \"http://webhook:9080/webhooks/postman\",\n    \"method\": \"POST\",\n    \"body\": {\n      \"event\": \"user.created\",\n      \"user_id\": \"12345\"\n    }\n  }\n}"
             },
             "url": {
               "raw": "{{base_url}}/v1/notifications",

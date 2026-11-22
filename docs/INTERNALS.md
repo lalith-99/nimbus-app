@@ -40,12 +40,13 @@ If you remember nothing else, remember this:
 
 > **The PostgreSQL database is both the source of truth *and* the work queue.**
 
-When a request arrives, we write a row to Postgres with `status = 'pending'` and immediately tell the
-client "got it." A separate background **worker** later reads pending rows and does the slow work
-(actually sending the email/SMS/webhook). Everything else in Nimbus — retries, the dead-letter queue,
-idempotency, circuit breakers — exists to make that two-step dance correct and reliable.
+When a request arrives, we write a row to Postgres with `status = 'pending'`. A background
+worker later claims pending rows and sends the email, SMS, or webhook. The REST handler may also
+attempt an SQS publish after the insert; that call is synchronous and best effort.
 
-This is called the **transactional outbox pattern**. The name will make sense by the end of §5.
+This is a database-backed work queue. It retains pending work independently of SQS, but there is
+no transaction spanning the database write and queue publish. Retries, dead-letter handling,
+request deduplication, and circuit breakers address different failure points in that flow.
 
 Everything branches from this single decision. Keep it in mind as you read.
 
@@ -714,9 +715,9 @@ They serve different audiences:
 | Encoding | JSON (readable, universal) | Protobuf (compact, typed) |
 | Killer feature | works everywhere, curl-able | **server streaming** + strong typing |
 
-The decisive reason gRPC earns its place is **server streaming** — something REST can't do cleanly. We
-get to that below. The cost of supporting both is running two listeners; we accept it for the clean
-split between "public front door" and "internal hallway."
+gRPC provides typed clients and a server-streaming method in the same contract. HTTP alternatives
+such as server-sent events or WebSockets could also carry status updates. Nimbus uses two listeners
+to keep the REST and gRPC wiring separate; that adds another port and protocol to operate.
 
 ### The contract: [notification.proto](../proto/notification/v1/notification.proto)
 
@@ -777,9 +778,11 @@ type Server struct {
 regenerate, this struct *still compiles* — you implement the new method when ready instead of the build
 breaking immediately.
 
-Each method follows the same shape: **get tenant from the authenticated context → validate → call repo
-→ map DB model to Protobuf** (via the `toProto` helper). The security rule is the same as everywhere:
-the tenant comes from the auth token, never from the request body.
+Each gRPC method follows the same shape: **get tenant from the authenticated context → validate → call
+repo → map DB model to Protobuf** (via the `toProto` helper). The gRPC tenant comes from the auth token;
+an optional body tenant is checked for a mismatch. REST does not currently enforce the same
+authentication and ownership checks. The transports also differ in request deduplication, rate
+limiting, and SQS publishing; those are wired into the REST path only.
 
 ### Authentication: interceptors ([interceptor.go](../internal/grpc/interceptor.go))
 
@@ -804,15 +807,15 @@ func (w *wrappedServerStream) Context() context.Context { return w.ctx }
 
 Now the streaming handler reads the tenant the exact same way (`TenantIDFromContext`) as the unary one.
 
-### The streaming RPC — why it's the whole point
+### The streaming RPC and its database cost
 
-`StreamDeliveryUpdates` lets a caller watch a notification's status change in real time. Compare two
-ways to do that:
+`StreamDeliveryUpdates` keeps one client RPC open while the server samples notification status:
 
-- **Client polling (REST):** the client calls `GET /notifications/123` every 2 seconds asking "done
+- **Client polling (REST):** the client calls `GET /v1/notifications/{id}` every 2 seconds asking "done
   yet? done yet?" That's a request every 2s *whether or not anything changed*.
-- **Server streaming (gRPC):** the client opens **one** stream and the *server* pushes an update
-  whenever the status changes, then closes the stream when it reaches a terminal state.
+- **Server streaming (gRPC):** the client opens one stream. Every 2 seconds, the server reads the
+  notification and sends its current state, including repeated snapshots when nothing changed.
+  It closes the stream after sending a terminal state.
 
 The server side ([server.go](../internal/grpc/server.go)) is a loop on a 2-second ticker that reads the
 row and pushes:
@@ -833,10 +836,10 @@ for {
 }
 ```
 
-Ownership is checked **once** before the loop opens (so a caller can't stream another tenant's
-notification by guessing an ID), and the stream auto-closes on a terminal state so neither side has to
-time out. On a high-volume system this replaces thousands of poll requests with a handful of pushed
-updates.
+Ownership is checked once before the loop opens, and the stream closes on a terminal state. This
+removes repeated client get requests but retains one database read every 2 seconds per active stream.
+The emitted `updated_at` is the snapshot time, not the row's last-change timestamp. No concurrent-stream
+capacity or request-reduction measurement has been established here.
 
 > **Wiring recap** ([main.go](../cmd/gateway/main.go)): create the gRPC server with the two
 > interceptors attached, `RegisterNotificationServiceServer` our implementation, `net.Listen` on
@@ -845,8 +848,7 @@ updates.
 > exit.
 
 **Why / Alternatives / Tradeoff**
-- *Why gRPC at all:* typed contracts + binary efficiency for internal callers, and streaming for live
-  updates without polling.
+- *Why gRPC at all:* typed contracts and one long-lived client RPC for status snapshots.
 - *Alternative:* REST + WebSockets for the streaming need. Rejected — gRPC gives streaming, codegen,
   and typing in one consistent tool for service-to-service.
 - *Tradeoff:* a second protocol/port to operate, and Protobuf isn't curl-friendly (you need
@@ -985,49 +987,42 @@ Each row is a decision, *why* it was made, the main alternative, and the cost ac
 
 ## 13. Run it and watch each piece work
 
-The fastest way to *understand* this is to run it and watch the logs narrate the lifecycle.
+From the repository root, run the same local webhook walkthrough used by CI:
 
 ```bash
-cd nimbus
-
-# Dependencies (Postgres + Redis) in Docker
-docker compose up -d postgres redis
-
-# Apply the schema
-DATABASE_URL="postgres://nimbus:nimbus123@localhost:5432/nimbus?sslmode=disable" go run ./cmd/migrator
-
-# Run the gateway (DB creds must match the Docker Postgres)
-DB_USER=nimbus DB_PASSWORD=nimbus123 go run ./cmd/gateway/main.go
+docker compose up --build --wait --wait-timeout 120
+docker compose run --rm smoke
+docker compose logs gateway webhook
 ```
 
-Then, in another terminal, create one notification and **watch the gateway logs**:
+Compose starts PostgreSQL with pgvector, applies the forward migrations, and starts Redis, the
+webhook receiver, and the gateway. PostgreSQL and Redis are reachable only inside the Compose
+network. Starting a host `go run` process against `localhost:5432` will not connect to this stack.
 
-```bash
-curl -X POST http://localhost:8080/v1/notifications \
-  -H "Content-Type: application/json" \
-  -d '{"tenant_id":"00000000-0000-0000-0000-000000000001",
-       "user_id":"00000000-0000-0000-0000-000000000002",
-       "channel":"email","payload":{"to":"you@example.com","subject":"Hi","body":"Hello"}}'
-```
+The smoke output follows one notification through persistence, worker pickup, and webhook delivery.
+It then checks request replay, a real failed send followed by retry, and dead-letter recovery. To
+finish quickly, it explicitly advances retry state and seeds the final-attempt fixture; it does not
+wait through the normal backoff schedule or measure throughput.
 
-What you'll observe in the logs, mapping directly to this doc:
-1. `notification created` — the durable INSERT (§5, the outbox).
-2. Within ~5s, the worker claims it (§6, the `SKIP LOCKED` claim).
-3. Without AWS credentials the SES send *fails* — you'll see it go back to `pending` with backoff
-   (§6, retries), and after 5 attempts land in the DLQ (§6, dead-lettering). **That's the full
-   lifecycle working correctly** — you're just watching it without a real email provider attached.
+For a manual request, use [the local webhook example](LOCAL_DEMO.md#send-one-notification-manually).
+That example targets `http://webhook:9080` from the gateway container. The receiver's inspection API
+is available to the host at `http://127.0.0.1:9080`.
 
-Inspect state as it moves:
+Inspect the default manual tenant and service state:
 
 ```bash
 curl "http://localhost:8080/v1/notifications?tenant_id=00000000-0000-0000-0000-000000000001"
-curl  "http://localhost:8080/v1/dlq?tenant_id=00000000-0000-0000-0000-000000000001"
-curl  http://localhost:8080/v1/health/circuits   # watch a breaker trip after 5 failures (§7)
-curl  http://localhost:8080/metrics | grep nimbus # the Prometheus counters (§11)
+curl "http://localhost:8080/v1/dlq?tenant_id=00000000-0000-0000-0000-000000000001"
+curl http://localhost:8080/v1/health/circuits
+curl http://localhost:8080/metrics
 ```
 
-To see the integrations fully working, set `AWS_*` + `SES_FROM_EMAIL` (real email) and/or
-`OPENAI_API_KEY` (compose + RAG).
+The smoke script uses a fresh tenant for each run, so its records will not appear under the manual
+tenant above. The local configuration uses dummy AWS credentials and disables SQS and AI calls.
+Email, SMS, and AI integrations require separate configuration and are not verified by this walkthrough.
+
+See [Local demo](LOCAL_DEMO.md) for ports, manual failure scenarios, gRPC commands, and volume behavior.
+Stop the stack with `docker compose down` to retain its local data.
 
 ---
 
@@ -1046,8 +1041,9 @@ A suggested reading order for the code itself, now that you have the map:
 
 **Experiments that build real intuition** (the best way to internalize the tradeoffs is to break
 things):
-- Run **two** gateways pointed at the same DB, create many notifications, and confirm no notification
-  is delivered twice — that's `SKIP LOCKED` in action.
+- Run two gateways pointed at the same database and observe which worker claims each row. Check
+  receiver history for duplicates separately: database claims coordinate active work but do not
+  make provider sends atomic with status updates.
 - `kill -9` a worker mid-send and watch a healthy one reclaim the stuck `processing` row after 5
   minutes.
 - Point the webhook channel at a URL that always 500s and watch the circuit breaker go
