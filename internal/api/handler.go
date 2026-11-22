@@ -590,6 +590,10 @@ func (h *Handler) RetryDeadLetterItem(w http.ResponseWriter, r *http.Request) {
 
 	// Retry creates a new notification from the DLQ item
 	newNotif, err := h.repo.RetryDeadLetter(ctx, dlqID)
+	if errors.Is(err, db.ErrDeadLetterProcessed) {
+		h.writeError(w, http.StatusConflict, "already_processed", "Dead letter already processed", "")
+		return
+	}
 	if err != nil {
 		h.logger.Error("failed to retry dead letter item",
 			zap.Error(err),
