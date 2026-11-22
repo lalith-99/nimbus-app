@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -545,6 +546,8 @@ func (r *Repository) GetDeadLetter(ctx context.Context, id uuid.UUID) (*DeadLett
 	return &dlq, nil
 }
 
+var ErrDeadLetterProcessed = errors.New("dead letter already processed")
+
 // RetryDeadLetter creates a new notification from a DLQ item and marks it as retried
 func (r *Repository) RetryDeadLetter(ctx context.Context, dlqID uuid.UUID) (*Notification, error) {
 	// Get the DLQ item
@@ -554,7 +557,7 @@ func (r *Repository) RetryDeadLetter(ctx context.Context, dlqID uuid.UUID) (*Not
 	}
 
 	if dlq.Status != DLQStatusPending {
-		return nil, fmt.Errorf("dead letter already processed: %s", dlq.Status)
+		return nil, ErrDeadLetterProcessed
 	}
 
 	// Start transaction
@@ -600,11 +603,15 @@ func (r *Repository) RetryDeadLetter(ctx context.Context, dlqID uuid.UUID) (*Not
 	updateQuery := `
 		UPDATE dead_letter_notifications 
 		SET status = $1, retried_notification_id = $2
-		WHERE id = $3
+		WHERE id = $3 AND status = $4
 	`
-	_, err = tx.Exec(ctx, updateQuery, DLQStatusRetried, newNotif.ID, dlqID)
+	result, err := tx.Exec(ctx, updateQuery, DLQStatusRetried, newNotif.ID, dlqID, DLQStatusPending)
 	if err != nil {
 		return nil, fmt.Errorf("update dead letter: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		// A concurrent retry or discard won. Roll back the speculative insert.
+		return nil, ErrDeadLetterProcessed
 	}
 
 	if err = tx.Commit(ctx); err != nil {

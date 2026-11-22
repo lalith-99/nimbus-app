@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the local webhook stack. Never point this state-changing fixture at production."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import json
 import os
 import sys
@@ -46,7 +49,7 @@ class Smoke:
                 status, response_headers, raw = response.status, response.headers, response.read()
         except HTTPError as response:
             status, response_headers, raw = response.code, response.headers, response.read()
-        if status != expected:
+        if status not in (expected if isinstance(expected, tuple) else (expected,)):
             raise RuntimeError(f"{method} {path}: expected {expected}, got {status}: {raw.decode(errors='replace')[:500]}")
         try:
             result = json.loads(raw)
@@ -153,7 +156,19 @@ class Smoke:
         print("PASS: worker moved notification to DLQ; two real 503s observed, attempt count seeded to 4.", flush=True)
 
         self.scenario(exhausted, 0)
-        recovered, _ = self.request(self.api, f"/v1/dlq/{dead_letter['id']}/retry", "POST")
+        racers = 6
+        ready = Barrier(racers)
+
+        def retry_once(_):
+            ready.wait(timeout=5)
+            result, _ = self.request(self.api, f"/v1/dlq/{dead_letter['id']}/retry", "POST", expected=(200, 409))
+            return result
+
+        with ThreadPoolExecutor(max_workers=racers) as pool:
+            replies = list(pool.map(retry_once, range(racers)))
+        winners = [reply for reply in replies if "new_notification_id" in reply]
+        assert len(winners) == 1, f"expected one recovery across {racers} retries, got {len(winners)}"
+        recovered = winners[0]
         recovery_id = recovered["new_notification_id"]
         assert recovery_id != original_id, "DLQ recovery should create a fresh notification"
         self.wait_status(recovery_id, "sent", 1)
