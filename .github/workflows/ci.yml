@@ -59,7 +59,8 @@ jobs:
         run: |
           psql -h localhost -U nimbus -d nimbus -v ON_ERROR_STOP=1 \
             -f migrations/001_create_notifications.up.sql \
-            -f migrations/002_create_dead_letter_queue.up.sql
+            -f migrations/002_create_dead_letter_queue.up.sql \
+            -f migrations/004_worker_claim_order.up.sql
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...

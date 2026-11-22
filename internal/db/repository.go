@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"time"
@@ -254,77 +255,14 @@ func (r *Repository) GetPendingNotifications(ctx context.Context, limit int) ([]
 	return notifications, nil
 }
 
-// stuckProcessingTimeout is how long a notification can sit in 'processing'
-// before we assume the worker that claimed it crashed and reclaim the row.
-// It must be comfortably larger than the longest possible single send
-// (SES/SNS/webhook timeout + retries), otherwise we'd reclaim a row that's
-// still being legitimately worked on and double-send it.
-const stuckProcessingTimeout = 5 * time.Minute
+//go:embed sql/claim_pending.sql
+var claimPendingSQL string
 
-// ClaimPendingNotifications atomically claims a batch of notifications for
-// processing. This is the heart of running multiple worker replicas safely.
-//
-// THE PROBLEM IT SOLVES:
-// The naive approach — SELECT pending rows, then UPDATE them to 'processing'
-// in a second statement — has a race window. With N worker replicas polling
-// concurrently, two workers can SELECT the *same* rows before either UPDATEs,
-// and both can send the notification. Combining selection and the state change
-// removes that claim race; it does not make external delivery atomic with the DB.
-//
-// THE FIX:
-// We do the claim in ONE atomic statement using `FOR UPDATE SKIP LOCKED`:
-//
-//		UPDATE ... WHERE id IN (
-//		    SELECT id ... FOR UPDATE SKIP LOCKED
-//		)
-//
-//	  - FOR UPDATE row-locks the selected rows for the duration of the statement.
-//	  - SKIP LOCKED tells Postgres: if a row is already locked by another worker,
-//	    skip it instead of blocking. So each worker gets a DISJOINT set of rows.
-//
-// The notification row acts as a database-backed work queue. An optional SQS
-// message prompts a claim, but the row remains the source of pending work.
-//
-// CRASH RECOVERY:
-// We also reclaim rows stuck in 'processing' longer than stuckProcessingTimeout.
-// If a worker crashes mid-send, its row would otherwise be orphaned forever
-// (the old query only looked at status='pending'). Reclamation allows another
-// worker to retry. If the provider already accepted a send before the crash or
-// before a failed status write, that retry can duplicate the external effect.
-// A live but slow worker can also exceed the timeout; no fencing token is sent
-// to the provider, so stale-claim recovery is not an exactly-once guarantee.
-//
-// Interview talking point:
-// "The single biggest correctness bug in a multi-replica queue worker is the
-//
-//	SELECT-then-UPDATE race. I close it with FOR UPDATE SKIP LOCKED so each
-//	replica atomically claims a disjoint batch, and I reclaim stuck 'processing'
-//	rows on a timeout so a crashed worker doesn't strand notifications."
+// ClaimPendingNotifications locks a batch ordered by eligibility and marks its
+// rows processing in one statement. SKIP LOCKED lets overlapping workers take
+// disjoint rows. Expired work becomes eligible again after five minutes.
 func (r *Repository) ClaimPendingNotifications(ctx context.Context, limit int) ([]*Notification, error) {
-	query := `
-		UPDATE notifications
-		SET status = 'processing', updated_at = NOW()
-		WHERE id IN (
-			SELECT id
-			FROM notifications
-			WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
-			   OR (status = 'processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
-			ORDER BY created_at ASC
-			LIMIT $1
-			FOR UPDATE SKIP LOCKED
-		)
-		RETURNING
-			id, tenant_id, user_id, channel, payload,
-			status, attempt, error_message, next_retry_at,
-			created_at, updated_at
-	`
-
-	// Pass the timeout as an integer number of seconds and multiply by a
-	// 1-second interval. We deliberately avoid Duration.String() ("5m0s")
-	// because Postgres interval parsing treats a bare "m" as MONTHS, not minutes.
-	reclaimSeconds := int(stuckProcessingTimeout.Seconds())
-
-	rows, err := r.db.Pool().Query(ctx, query, limit, reclaimSeconds)
+	rows, err := r.db.Pool().Query(ctx, claimPendingSQL, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim pending notifications: %w", err)
 	}
@@ -378,20 +316,16 @@ func (r *Repository) ClaimNotificationByID(ctx context.Context, id uuid.UUID) (*
 		UPDATE notifications
 		SET status = 'processing', updated_at = NOW()
 		WHERE id = $1
-		  AND (
-		        (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
-		     OR (status = 'processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
-		  )
+		  AND status IN ('pending', 'processing')
+		  AND nimbus_claimable_at(status, created_at, next_retry_at, updated_at) <= now() AT TIME ZONE 'UTC'
 		RETURNING
 			id, tenant_id, user_id, channel, payload,
 			status, attempt, error_message, next_retry_at,
 			created_at, updated_at
 	`
 
-	reclaimSeconds := int(stuckProcessingTimeout.Seconds())
-
 	var notif Notification
-	err := r.db.Pool().QueryRow(ctx, query, id, reclaimSeconds).Scan(
+	err := r.db.Pool().QueryRow(ctx, query, id).Scan(
 		&notif.ID,
 		&notif.TenantID,
 		&notif.UserID,

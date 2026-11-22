@@ -350,53 +350,13 @@ func (w *Worker) Start(ctx context.Context) {
 }
 ```
 
-### The claim query — where correctness is won or lost
+### Claiming work in eligibility order
 
-`processBatch` calls [ClaimPendingNotifications](../internal/db/repository.go). This is the most
-important query in the codebase, so we'll dwell on it.
+Both the SQS consumer and the polling worker use the same PostgreSQL eligibility rule. A fresh notification is eligible at creation, a scheduled retry at its retry time, and a processing row five minutes after the claim timestamp. A partial B-tree orders pending and processing rows by that time, then creation time and ID. Terminal rows occupy no space in this index. A retry created yesterday but due a minute ago follows work that has been ready for an hour. [Migration](../migrations/004_worker_claim_order.up.sql)
 
-**The bug it avoids.** The obvious implementation is two statements: `SELECT` the pending rows, then
-`UPDATE` them to `processing`. But picture two worker replicas (you run several for availability) both
-polling at the same instant. Both `SELECT` the *same* rows before either `UPDATE`s. Now both deliver
-those notifications. The user gets duplicates. This is a classic **read-then-write race**.
+The poller scans the due range in order and locks up to the batch limit using `FOR UPDATE SKIP LOCKED`. An overlapping worker skips rows another transaction already holds. The same statement changes the selected rows to processing and returns their database timestamps. Those timestamps fence status and dead-letter writes after a reclaim. The SQS consumer can use the primary key for a single ID and applies the same eligibility function. [Batch SQL](../internal/db/sql/claim_pending.sql) · [Single-row and outcome queries](../internal/db/repository.go)
 
-**The fix** — do the claim in *one atomic statement*:
-
-```sql
-UPDATE notifications
-SET status = 'processing', updated_at = NOW()
-WHERE id IN (
-    SELECT id FROM notifications
-    WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
-       OR (status = 'processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second'))
-    ORDER BY created_at ASC
-    LIMIT $1
-    FOR UPDATE SKIP LOCKED        -- ← the magic
-)
-RETURNING id, tenant_id, …;
-```
-
-Two clauses make this work:
-
-- **`FOR UPDATE`** locks each selected row for the duration of the statement.
-- **`SKIP LOCKED`** says: *if a row is already locked by another transaction, don't wait — skip it.*
-
-These operations coordinate concurrent batch claims using PostgreSQL row locks, without a
-separate Redis lock or leader election. They close the select-then-update race. They do not make
-an external provider send atomic with the later database update, and a stale row can be claimed
-again during recovery.
-
-**The crash-recovery clause.** The second half of the `WHERE` —
-`OR (status = 'processing' AND updated_at < NOW() - interval)` — reclaims rows stuck in `processing`
-for more than 5 minutes ([stuckProcessingTimeout](../internal/db/repository.go)). If a worker claims a
-row and then crashes mid-send, that row would otherwise be orphaned in `processing` forever. This
-clause lets another worker try it again. A slow, live worker can also exceed the timeout; there is
-no provider-facing fencing token. Recovery can therefore duplicate an external effect.
-
-> One subtle, real bug that's already been fixed here: the interval is passed as
-> `$2 * INTERVAL '1 second'` with an integer number of seconds, *not* as Go's `Duration.String()`
-> ("5m0s"). Postgres reads a bare `m` in an interval string as **months**, so "5m0s" would mean
-> "5 months" — a nasty silent bug. Passing seconds avoids it entirely.
+A worker can crash after a provider has accepted a send and before PostgreSQL records its success. Reclaiming the row preserves progress but can repeat the provider effect.
 
 ### Processing one notification
 

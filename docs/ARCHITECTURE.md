@@ -261,9 +261,7 @@ erDiagram
 
 **Indexing strategy:**
 
-- `idx_notifications_retry (status, next_retry_at, created_at) WHERE status IN ('pending','processing')`
-  — a **partial index**. The worker's hot query only scans rows that can actually be claimed, so
-  the index stays tiny even when millions of `sent` rows accumulate.
+- `idx_notifications_claimable` orders pending and processing rows by eligibility, creation time and ID. The poller range-scans due work. Terminal notifications occupy no entries. The older status/retry index remains available during an application rollout.
 - `idx_notifications_tenant (tenant_id, created_at DESC)` — powers tenant list views with no sort.
 - `knowledge_base` carries **two** ANN/search indexes: an **HNSW** index for vector similarity and a
   **GIN** index on the generated `content_tsv` column for full-text — this is what makes *hybrid*
@@ -360,29 +358,9 @@ flowchart TD
 > claim error leaves the SQS message unacknowledged. The poller also finds pending rows whose
 > SQS enqueue failed. SQS messages can be redelivered; the notification row remains authoritative.
 
-### The atomic claim — the heart of horizontal scalability
+### Atomic worker claims
 
-```sql
-UPDATE notifications
-SET status = 'processing', updated_at = NOW()
-WHERE id IN (
-    SELECT id FROM notifications
-    WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
-       OR (status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes') -- reclaim stuck rows
-    ORDER BY created_at
-    LIMIT $1
-    FOR UPDATE SKIP LOCKED
-)
-RETURNING ...;
-```
-
-- **`FOR UPDATE SKIP LOCKED`** coordinates concurrent batch claims through PostgreSQL row locks;
-  no separate Redis lock or leader election is used for this operation.
-- **Stuck-row reclamation:** if a worker crashes mid-send, its row is stranded in `processing`.
-  The `OR processing older than 5m` clause makes it eligible for reclamation. A slow, live worker
-  can also exceed that timeout; there is no fencing token on an external provider send.
-- **Claim and mark in one statement:** the batch query closes the separate select/update race.
-  `ClaimNotificationByID` uses a conditional update to claim one eligible row for the SQS path.
+The poller selects due notification IDs from the partial eligibility index, using `LIMIT` and `FOR UPDATE SKIP LOCKED`. It updates those locked rows to processing in the same statement. The database timestamp trigger gives each new claim its timestamp for guarded outcome writes. New work becomes eligible on creation, retries at their schedule, and expired workers five minutes after their last claim. The SQS consumer uses the same cutoff with a primary-key lookup. [Batch query](../internal/db/sql/claim_pending.sql) · [Queue benchmark and plans](performance/worker-claims.md)
 
 ### The external side-effect boundary
 
