@@ -1,0 +1,271 @@
+{
+  "workflow_run": 45033202900,
+  "workflow_job": 137241120031,
+  "reference_commit": "848cdbc6ed7584433b066aa86c4a6c79ac3f1235",
+  "candidate_commit": "2e57dd1bed5f1a7341c98e4a4da5be955c55d057",
+  "runner_facts": [
+    "2e57dd1bed5f1a7341c98e4a4da5be955c55d057",
+    "848cdbc6ed7584433b066aa86c4a6c79ac3f1235",
+    "CPU(s):                                  4",
+    "Model name:                              AMD EPYC 9V74 80-Core Processor",
+    "Mem:            15Gi       883Mi        14Gi        42Mi       874Mi        14Gi",
+    "Python 3.14.4",
+    "848cdbc6ed7584433b066aa86c4a6c79ac3f1235",
+    "2e57dd1bed5f1a7341c98e4a4da5be955c55d057"
+  ],
+  "trials": [
+    {
+      "variant": "baseline",
+      "requested": 200,
+      "clients": 32,
+      "tenants": 3,
+      "accepted_responses": 200,
+      "unique_accepted_ids": 200,
+      "errors": {},
+      "ingress_s": 0.133,
+      "accepted_per_s": 1498.91,
+      "api_ack_ms": {
+        "p50": 15.34,
+        "p95": 29.37,
+        "p99": 36.13
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 200
+      },
+      "final_db_counts": {
+        "sent": 200
+      },
+      "db_rows": 200,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 200,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 99.454,
+      "completed_webhooks_per_s": 2.01,
+      "submission_to_webhook_ms": {
+        "p50": 49402.9,
+        "p95": 94344.43,
+        "p99": 99336.24
+      }
+    },
+    {
+      "variant": "baseline",
+      "requested": 200,
+      "clients": 32,
+      "tenants": 3,
+      "accepted_responses": 200,
+      "unique_accepted_ids": 200,
+      "errors": {},
+      "ingress_s": 0.143,
+      "accepted_per_s": 1396.34,
+      "api_ack_ms": {
+        "p50": 13.48,
+        "p95": 32.91,
+        "p99": 39.41
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 200
+      },
+      "final_db_counts": {
+        "sent": 200
+      },
+      "db_rows": 200,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 200,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 99.488,
+      "completed_webhooks_per_s": 2.01,
+      "submission_to_webhook_ms": {
+        "p50": 49432.43,
+        "p95": 94383.32,
+        "p99": 99367.47
+      }
+    },
+    {
+      "variant": "baseline",
+      "requested": 200,
+      "clients": 32,
+      "tenants": 3,
+      "accepted_responses": 200,
+      "unique_accepted_ids": 200,
+      "errors": {},
+      "ingress_s": 0.139,
+      "accepted_per_s": 1437.49,
+      "api_ack_ms": {
+        "p50": 18.51,
+        "p95": 35.56,
+        "p99": 40.86
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 200
+      },
+      "final_db_counts": {
+        "sent": 200
+      },
+      "db_rows": 200,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 200,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 99.57,
+      "completed_webhooks_per_s": 2.01,
+      "submission_to_webhook_ms": {
+        "p50": 49512.36,
+        "p95": 94472.24,
+        "p99": 99446.18
+      }
+    },
+    {
+      "variant": "candidate",
+      "requested": 200,
+      "clients": 32,
+      "tenants": 3,
+      "accepted_responses": 200,
+      "unique_accepted_ids": 200,
+      "errors": {},
+      "ingress_s": 0.128,
+      "accepted_per_s": 1563.36,
+      "api_ack_ms": {
+        "p50": 13.68,
+        "p95": 26.73,
+        "p99": 33.33
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 200
+      },
+      "final_db_counts": {
+        "sent": 200
+      },
+      "db_rows": 200,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 200,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 4.729,
+      "completed_webhooks_per_s": 42.29,
+      "submission_to_webhook_ms": {
+        "p50": 4518.31,
+        "p95": 4608.57,
+        "p99": 4616.5
+      }
+    },
+    {
+      "variant": "candidate",
+      "requested": 200,
+      "clients": 32,
+      "tenants": 3,
+      "accepted_responses": 200,
+      "unique_accepted_ids": 200,
+      "errors": {},
+      "ingress_s": 0.127,
+      "accepted_per_s": 1571.82,
+      "api_ack_ms": {
+        "p50": 13.2,
+        "p95": 27.05,
+        "p99": 31.99
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 200
+      },
+      "final_db_counts": {
+        "sent": 200
+      },
+      "db_rows": 200,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 200,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 3.99,
+      "completed_webhooks_per_s": 50.12,
+      "submission_to_webhook_ms": {
+        "p50": 3808.73,
+        "p95": 3868.02,
+        "p99": 3875.93
+      }
+    },
+    {
+      "variant": "candidate",
+      "requested": 200,
+      "clients": 32,
+      "tenants": 3,
+      "accepted_responses": 200,
+      "unique_accepted_ids": 200,
+      "errors": {},
+      "ingress_s": 0.135,
+      "accepted_per_s": 1478.94,
+      "api_ack_ms": {
+        "p50": 14.95,
+        "p95": 31.51,
+        "p99": 36.89
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 200
+      },
+      "final_db_counts": {
+        "sent": 200
+      },
+      "db_rows": 200,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 200,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 4.393,
+      "completed_webhooks_per_s": 45.53,
+      "submission_to_webhook_ms": {
+        "p50": 4214.2,
+        "p95": 4266.82,
+        "p99": 4275.54
+      }
+    },
+    {
+      "variant": "candidate-large",
+      "requested": 10000,
+      "clients": 32,
+      "tenants": 125,
+      "accepted_responses": 10000,
+      "unique_accepted_ids": 10000,
+      "errors": {},
+      "ingress_s": 7.424,
+      "accepted_per_s": 1346.89,
+      "api_ack_ms": {
+        "p50": 19.89,
+        "p95": 44.34,
+        "p99": 112.39
+      },
+      "first_db_sample_after_ingress": {
+        "pending": 9380,
+        "sent": 620
+      },
+      "final_db_counts": {
+        "sent": 10000
+      },
+      "db_rows": 10000,
+      "db_id_mismatches": 0,
+      "db_rows_without_one_sent_attempt": 0,
+      "observed_webhooks": 10000,
+      "missing_at_receiver": 0,
+      "duplicate_receipts": 0,
+      "invalid_receipts": 0,
+      "first_submission_to_last_receipt_s": 23.796,
+      "completed_webhooks_per_s": 420.23,
+      "submission_to_webhook_ms": {
+        "p50": 11787.58,
+        "p95": 16017.38,
+        "p99": 16387.5
+      }
+    }
+  ]
+}
