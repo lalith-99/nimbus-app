@@ -1,4 +1,4 @@
-.PHONY: help build run test clean deps test-cover test-quick lint dev docker-build docker-push validate ci-local
+.PHONY: help build run test clean deps test-cover test-quick lint dev docker-build docker-push validate ci-local demo demo-up demo-smoke demo-down
 
 # Configuration
 REGISTRY ?= 
@@ -72,3 +72,16 @@ validate: ## Validate project structure and dependencies
 	@echo "Project validation passed"
 
 all: validate ci-local ## Run full validation and CI
+
+# Local-only webhook demo; Docker Compose v2 is the only prerequisite.
+demo: demo-up ## Start the local stack and verify notification delivery/recovery
+	$(MAKE) demo-smoke
+
+demo-up: ## Start the local PostgreSQL, Redis, webhook receiver and gateway
+	docker compose up --build --wait --wait-timeout 120
+
+demo-smoke: ## Verify local webhook delivery, deduplication, retry and DLQ recovery
+	docker compose run --rm smoke
+
+demo-down: ## Stop the local demo (keeps its database and Redis volumes)
+	docker compose down

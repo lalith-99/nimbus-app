@@ -43,9 +43,9 @@ func NewServer(repo NotificationRepository, logger *zap.Logger) *Server {
 // ─── RPCs ────────────────────────────────────────────────────────────────────
 
 // CreateNotification — Unary RPC.
-// Mirrors POST /v1/notifications but for internal callers.
-// Advantages over REST: strong protobuf typing, binary encoding (~5x smaller
-// than JSON), built-in deadline propagation via gRPC context.
+// Creates a notification through the shared repository using typed protobuf
+// messages and gRPC deadlines. This path does not run REST Redis idempotency,
+// rate limiting, or SQS enqueue; delivery is picked up by the database poller.
 func (s *Server) CreateNotification(
 	ctx context.Context,
 	req *notificationv1.CreateNotificationRequest,
@@ -152,17 +152,14 @@ func (s *Server) GetNotification(
 // The client opens ONE persistent HTTP/2 stream and the server pushes status
 // updates every 2 seconds until a terminal state is reached.
 //
-// Why server-streaming over polling?
-// Classic client-side polling: client fires GET /notifications/{id} every N seconds.
-// That's N requests × duration regardless of whether anything changed.
-// Server-streaming: ONE request, server drives the cadence. O(1) requests total.
-// On a 100K events/day system, eliminating polling saves thousands of requests/day.
+// A client keeps one RPC open instead of making repeated get requests. The
+// server still polls the database every two seconds for each active stream;
+// the database workload therefore grows with the number of streams. No measured
+// request-reduction percentage or concurrent-stream capacity is implied.
 //
-// Implementation note on internal polling:
-// We poll the DB every 2s rather than using Postgres LISTEN/NOTIFY because
-// LISTEN/NOTIFY requires a persistent, non-pooled DB connection per active stream —
-// doesn't scale. DB polling with a short interval works fine for v1 and scales
-// horizontally (each replica polls independently).
+// LISTEN/NOTIFY with a shared listener and application-level fanout is an
+// alternative design. It would need reconnection handling and a durable-state
+// catch-up path; it does not require one database connection per client stream.
 func (s *Server) StreamDeliveryUpdates(
 	req *notificationv1.StreamDeliveryUpdatesRequest,
 	stream notificationv1.NotificationService_StreamDeliveryUpdatesServer,

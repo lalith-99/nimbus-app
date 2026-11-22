@@ -1,255 +1,136 @@
-<div align="center">
+# Nimbus
 
-# 🌩️ Nimbus
+**A Go notification service with REST and gRPC APIs, asynchronous workers, and recoverable delivery workflows.**
 
-**A multi-tenant notification orchestration platform in Go.**
+[![CI](https://github.com/lalith-99/nimbus-app/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lalith-99/nimbus-app/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](go.mod)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)](migrations/)
+[![Redis](https://img.shields.io/badge/Redis-request%20deduplication-DC382D?logo=redis&logoColor=white)](internal/redis/)
 
-Durably accept notification requests over **REST + gRPC**, and deliver them across **email, SMS, and
-webhook** channels with retries, dead-lettering, idempotency, rate limiting, circuit breaking, and an
-optional **AI/RAG** layer.
+[Run the local demo](#quick-start) · [Architecture](docs/ARCHITECTURE.md) · [API reference](docs/API.md) · [Verification](#verification)
 
-[![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![gRPC](https://img.shields.io/badge/gRPC-Protobuf-244c5a?logo=grpc)](https://grpc.io)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
-[![Redis](https://img.shields.io/badge/Redis-idempotency%20%2B%20rate%20limit-DC382D?logo=redis&logoColor=white)](https://redis.io)
-[![AWS](https://img.shields.io/badge/AWS-SES%20%7C%20SNS%20%7C%20SQS-FF9900?logo=amazonaws&logoColor=white)](https://aws.amazon.com)
-[![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?logo=terraform&logoColor=white)](https://www.terraform.io)
+Nimbus is a personal backend engineering project focused on the work that happens **after an API accepts a request**: coordinating workers, handling provider failures, scheduling retries, and making failed work inspectable and recoverable.
 
-[Quick Start](#-quick-start) · [Architecture](docs/ARCHITECTURE.md) · [API Reference](docs/API.md) · [Design Decisions](docs/ARCHITECTURE.md#15-key-design-decisions--tradeoffs)
+The service stores notification requests in PostgreSQL and dispatches them to email through AWS SES, SMS through AWS SNS, or HTTP webhooks. Redis supports REST request deduplication and HTTP rate limiting. An optional SQS consumer shares database claim logic with the polling worker. The local demo uses only a webhook receiver, PostgreSQL, and Redis; it needs no cloud account.
 
-</div>
+## Quick start
 
----
+Requirements: Git and Docker with the Docker Compose plugin.
 
-## What is Nimbus?
-
-Nimbus solves one hard problem well: **accept a notification request and guarantee it is eventually
-delivered (or explicitly dead-lettered), across multiple channels, for thousands of independent
-tenants — exactly once.**
-
-It is built around a **transactional outbox**: every request is written to PostgreSQL *before* the
-client is acknowledged, then delivered asynchronously. Delivery runs on **two paths that share one
-atomic claim guard**: an **SQS consumer** (event-driven hot path, sub-second) and a **DB-poll worker**
-(reconciliation backstop). The database is the single source of truth; the queue accelerates delivery
-but is never a hard dependency — if SQS is down, the poller still delivers everything.
-
-```mermaid
-graph LR
-    ext["External Clients"] -->|REST :8080| gw
-    svc["Internal Services"] -->|gRPC :9090| gw
-
-    subgraph gw["Nimbus Gateway"]
-        api["API + gRPC"] -->|INSERT pending| db
-        consumer["SQS Consumer<br/>hot path"] -->|claim by id| db
-        worker["DB-poll Worker<br/>SKIP LOCKED backstop"] -->|claim batch| db
-        consumer --> cb["Circuit Breakers"]
-        worker --> cb
-    end
-
-    db[("PostgreSQL<br/>+ pgvector")]
-    api -.->|idempotency<br/>rate limit| redis[("Redis")]
-    api -->|enqueue| sqs[["SQS"]]
-    sqs --> consumer
-    cb --> ses["SES"] & sns["SNS"] & hook["Webhooks"]
+```bash
+git clone https://github.com/lalith-99/nimbus-app.git
+cd nimbus-app
+docker compose up --build --wait
+docker compose run --rm smoke
 ```
 
-> 📐 **For system-design depth — C4 diagrams, sequence flows, state machines, scaling math, failure
-> modes, and tradeoff tables — read the [Architecture Deep Dive](docs/ARCHITECTURE.md).**
+The stack starts PostgreSQL with pgvector, applies forward migrations through a versioned migration job, starts Redis and a local webhook receiver, and exposes:
 
----
-
-## ✨ Features
-
-| Capability | Detail |
+| Interface | Local address |
 |---|---|
-| **Dual transport** | REST/JSON (`:8080`) for external clients, gRPC/Protobuf (`:9090`) for internal services. |
-| **Durable, exactly-once-ish delivery** | Transactional outbox + `FOR UPDATE SKIP LOCKED` claiming → safe horizontal scaling with no distributed locks. |
-| **Hybrid delivery** | Event-driven **SQS consumer** (sub-second hot path) + **DB-poll worker** (reconciliation backstop). Both funnel through one atomic DB claim, so they never double-send. |
-| **Multi-channel** | Email (AWS SES), SMS (AWS SNS), Webhook (HTTP POST), routed by a multi-sender. |
-| **Retries & backoff** | Exponential-ish backoff (1m → 5m → 15m), max 5 attempts. |
-| **Dead Letter Queue** | Failed messages quarantined with inspect / retry / discard endpoints. |
-| **Idempotency** | Redis-backed; auto content-hash keys (5 min) + client keys (24 h, Stripe-style). |
-| **Rate limiting** | Sliding-window per tenant (100 req/min) via Redis sorted sets. |
-| **Circuit breakers** | Per-channel Closed/Open/HalfOpen FSM; one provider outage can't cascade. |
-| **Server-streaming gRPC** | Push live delivery updates instead of client polling (~90% fewer requests). |
-| **AI compose** | Natural language → notifications via LLM function calling. |
-| **RAG Q&A** | pgvector hybrid search (vector + full-text, RRF) + rerank + injection/PII guards + cited answers. |
-| **Observability** | Prometheus metrics, structured zap logs, health + circuit-status endpoints. |
-| **Infra as Code** | Terraform for ECS Fargate, RDS, ElastiCache, SQS/SNS, ECR, Secrets Manager. |
+| REST API | `http://localhost:8080` |
+| gRPC API | `localhost:9090` |
+| Prometheus metrics | `http://localhost:8080/metrics` |
 
----
+The smoke walkthrough checks notification creation and delivery status, replay of an `Idempotency-Key`, a failed webhook attempt followed by retry, and dead-letter recovery. Retry timing is advanced using **explicit local database fixtures**; the walkthrough does not claim to wait through the normal retry schedule or simulate five real provider failures.
 
-## 🏗️ Tech Stack
+Compose uses an isolated local network, dummy AWS credentials, and local-only port bindings. Email, SMS, SQS, and AI calls are not part of this demo.
 
-| Layer | Technology |
+See **[the step-by-step local walkthrough](docs/LOCAL_DEMO.md)** for manual requests, expected behavior, gRPC examples, and how the retry fixtures work. If you used an older Compose setup, read its existing-volume notes before starting.
+
+```bash
+# Stop containers; keep the local database volume.
+docker compose down
+```
+
+## Design decisions
+
+| Decision | Why it is implemented this way | Tradeoff |
+|---|---|---|
+| **PostgreSQL stores the durable work record.** | The API inserts a pending notification before acknowledging creation. Workers can discover it without relying on an SQS publish succeeding. | Database availability and write throughput remain dependencies. This is a database-backed work queue, not an atomic transaction spanning PostgreSQL and SQS. |
+| **SQS and polling share database claims.** | REST can publish a best-effort SQS notification after the insert. The consumer claims one eligible row; the poller claims a batch with `FOR UPDATE SKIP LOCKED`. | Claims coordinate current ownership, but do not make an external provider send exactly once. Delayed retries and stale-work recovery still depend on polling. |
+| **Retry and dead-letter state stays inspectable.** | The worker records attempts and next retry times; exhausted work moves to a database dead-letter table with inspect, retry, and discard endpoints. | Recovery needs an operating database and workers. A manual retry creates a new notification and may repeat an external side effect. |
+
+The polling interval is 5 seconds without SQS and 30 seconds when SQS is configured. SQS publishing happens synchronously in the REST handler after the database insert and is best effort. The gRPC create path currently writes directly to the database and relies on the polling worker.
+
+### Delivery semantics and limits
+
+- A successful creation response means the notification was persisted, not delivered to its recipient.
+- Redis request deduplication applies to REST creation while the key and cached result remain available. It is separate from provider-side duplicate prevention, and is disabled if Redis cannot be initialized.
+- A worker can send successfully and crash before recording `sent`. Reclaiming or retrying that row can send again. Long-running work can also outlive the stale-claim threshold. **Exactly-once external delivery is not guaranteed.**
+- Retries are bounded: the worker uses delays of 1, 5, and then 15 minutes, with a maximum of 5 attempts before dead-letter handling. Provider acceptance is not proof that a person received or read a message.
+- The project includes tenant IDs and gRPC token-to-tenant checks. The REST routes do not currently enforce tenant authentication, and the configuration includes a development gRPC token. The supplied Compose setup is for local development, not a hardened public deployment.
+
+The [architecture guide](docs/ARCHITECTURE.md) explains state transitions, failure windows, and the assumptions behind the design.
+
+## Implemented capabilities
+
+| Area | Implementation |
 |---|---|
-| Language | Go 1.23 |
-| HTTP | Chi router + middleware |
-| RPC | gRPC + Protocol Buffers |
-| Datastore | PostgreSQL (pgxpool) + **pgvector** (HNSW) |
-| Cache / coordination | Redis (go-redis/v9) |
-| Messaging | AWS SQS (+ DLQ), SNS |
-| Email | AWS SES |
-| AI | OpenAI (gpt-4o-mini + text-embedding-3-small) |
-| Observability | Prometheus, zap |
-| Packaging | Docker, docker-compose |
-| Infrastructure | Terraform (AWS ECS Fargate) |
+| APIs | REST/JSON with Chi; gRPC/Protocol Buffers for create, get, and streamed status updates. |
+| Asynchronous processing | PostgreSQL pending records, batch/single-row claims, shared dispatch logic, and stale-processing recovery. |
+| Delivery | AWS SES email, AWS SNS SMS, and HTTP POST webhooks. |
+| Recovery | Retry scheduling and database dead-letter inspect/retry/discard endpoints. |
+| Request deduplication | Tenant-scoped Redis keys; automatic content-hash keys with a 5-minute TTL and client keys with a 24-hour TTL. |
+| Rate limiting | Redis sorted-set sliding windows for HTTP requests; concurrent checks and updates are not a strict atomic quota. |
+| Circuit breakers | Per-channel closed/open/half-open state and bounded probes. |
+| Status streaming | One gRPC stream; the server checks PostgreSQL every 2 seconds. This reduces repeated client calls, but retains server-side database polling. |
+| Observability | Prometheus metrics, structured zap logs, health and circuit-status endpoints. |
+| Packaging | Docker, Compose, forward SQL migrations, and Terraform infrastructure definitions. |
 
----
+An optional AI extension provides notification composition and retrieval-augmented Q&A using OpenAI and pgvector. It is disabled in the local demo and is documented separately in [AI Integration](ai-integration/README.md).
 
-## 🚀 Quick Start
+## Verification
 
-### Option A — Docker Compose (recommended)
-
-Spins up the gateway, PostgreSQL (with auto-migrations), and Redis:
+The [GitHub Actions workflow](https://github.com/lalith-99/nimbus-app/actions/workflows/ci.yml) runs the Go test suite with the race detector, builds the gateway, and runs the local Compose smoke walkthrough. Open the linked run to inspect its commit, job results, and demo output.
 
 ```bash
-docker compose up --build
-# Gateway → http://localhost:8080  (REST)  ·  localhost:9090  (gRPC)
+go test -race ./...
+go build ./cmd/gateway
+docker compose up --build --wait
+docker compose run --rm smoke
 ```
 
-### Option B — Run locally
+The tests exercise REST validation and repository interactions, gRPC tenant checks, worker success/retry/dead-letter paths, SQS consumer acknowledgement decisions, Redis request reservation/replay, rate limiting, and circuit-breaker transitions. Many unit tests use fakes; the Compose walkthrough exercises the real gateway, PostgreSQL, Redis, and local webhook receiver together.
 
-```bash
-# 1. Start dependencies (Postgres + Redis)
-docker compose up -d postgres redis
+The benchmarks in [`internal/sqs/producer_bench_test.go`](internal/sqs/producer_bench_test.go) measure local message construction and JSON serialization. They do **not** establish live SQS enqueue latency, provider delivery latency, or end-to-end throughput. No production capacity or latency result is claimed here.
 
-# 2. Run the gateway
-make dev          # or: go run ./cmd/gateway/main.go
-```
+AWS image publishing, migration, and deployment jobs are currently disabled in CI. Terraform files demonstrate infrastructure configuration; they are not evidence of a currently running service.
 
-### Smoke test
+## Configuration and API
 
-```bash
-# Health
-curl http://localhost:8080/health        # → OK
+Configuration is read from environment variables in [`internal/config/config.go`](internal/config/config.go). [`docker-compose.yaml`](docker-compose.yaml) supplies the isolated demo values.
 
-# Create a notification
-curl -X POST http://localhost:8080/v1/notifications \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "00000000-0000-0000-0000-000000000001",
-    "user_id":   "00000000-0000-0000-0000-000000000002",
-    "channel":   "email",
-    "payload":   { "to": "user@example.com", "subject": "Hi", "body": "Hello" }
-  }'
+| Variables | Purpose |
+|---|---|
+| `PORT`, `GRPC_PORT` | HTTP and gRPC listeners; default 8080 and 9090. |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSLMODE` | PostgreSQL connection. |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB` | Redis request deduplication and HTTP rate limiting. |
+| `AWS_REGION`, `SES_FROM_EMAIL`, `SNS_REGION` | Optional email and SMS delivery integrations. |
+| `SQS_QUEUE_URL`, `SQS_DLQ_URL`, `SQS_REGION` | Optional SQS path; the database polling worker continues to run. |
+| `GRPC_AUTH_TOKENS` | Comma-separated `token:tenantUUID` mappings; current configuration also retains the development token. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Optional AI extension; no key is needed for the notification demo. |
 
-# List them
-curl "http://localhost:8080/v1/notifications?tenant_id=00000000-0000-0000-0000-000000000001"
-```
-
-> 📖 Full endpoint and gRPC reference: **[docs/API.md](docs/API.md)**.
-
----
-
-## ⚙️ Configuration
-
-All configuration is via environment variables (sensible defaults for local dev).
-
-| Variable | Default | Description |
+| Method | Endpoint | Purpose |
 |---|---|---|
-| `PORT` | `8080` | HTTP/REST port. |
-| `GRPC_PORT` | `9090` | gRPC port. |
-| `ENV` / `LOG_LEVEL` | `development` / `info` | Runtime env and log verbosity. |
-| `DB_HOST` `DB_PORT` `DB_USER` `DB_PASSWORD` `DB_NAME` `DB_SSLMODE` | localhost:5432 | PostgreSQL connection. |
-| `REDIS_HOST` `REDIS_PORT` `REDIS_PASSWORD` `REDIS_DB` | localhost:6379 | Redis (optional — degrades gracefully). |
-| `AWS_REGION` `SES_FROM_EMAIL` | us-east-1 | Email via SES. |
-| `SNS_REGION` | us-east-1 | SMS via SNS. |
-| `SQS_QUEUE_URL` `SQS_DLQ_URL` `SQS_REGION` | — | SQS hot path (optional — enables the event-driven consumer; DB poll backstop still runs). |
-| `OPENAI_API_KEY` `OPENAI_MODEL` | — / `gpt-4o-mini` | Enables AI compose + RAG. |
-| `GRPC_AUTH_TOKENS` | `dev-token-nimbus:...0001` | `token:tenant` pairs, comma-separated. |
-
----
-
-## 🔌 API Surface
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/v1/notifications` | Create a notification (idempotent). |
-| `GET` | `/v1/notifications` | List by tenant (paginated). |
-| `GET` | `/v1/notifications/{id}` | Get one. |
+| `POST` | `/v1/notifications` | Persist a notification; REST supports request deduplication. |
+| `GET` | `/v1/notifications`, `/v1/notifications/{id}` | List by tenant or inspect one notification. |
 | `PATCH` | `/v1/notifications/{id}/status` | Update status. |
-| `GET` | `/v1/dlq` · `/v1/dlq/{id}` | Inspect dead-lettered items. |
-| `POST` | `/v1/dlq/{id}/retry` · `/discard` | Recover or abandon. |
-| `POST` | `/v1/ai/compose` | Natural language → notifications. |
-| `POST` | `/v1/ai/ask` | RAG question answering with citations. |
-| `GET` | `/health` · `/v1/health/circuits` | Liveness + circuit-breaker state. |
-| `GET` | `/metrics` | Prometheus metrics. |
+| `GET` | `/v1/dlq`, `/v1/dlq/{id}` | Inspect database dead-letter records. |
+| `POST` | `/v1/dlq/{id}/retry`, `/v1/dlq/{id}/discard` | Retry or discard dead-lettered work. |
+| `GET` | `/health`, `/v1/health/circuits`, `/metrics` | Health, breaker state, and Prometheus metrics. |
 
-**gRPC** (`notification.v1.NotificationService`): `CreateNotification`, `GetNotification`,
-`StreamDeliveryUpdates` (server-streaming). See [docs/API.md](docs/API.md#grpc-api).
+The `notification.v1.NotificationService` gRPC service exposes `CreateNotification`, `GetNotification`, and `StreamDeliveryUpdates`. See the [API reference](docs/API.md) and [local demo](docs/LOCAL_DEMO.md).
 
----
+## Code and documentation
 
-## 🧪 Testing
-
-```bash
-make test            # run all tests (verbose)
-make test-quick      # fast, no verbose
-make test-cover      # coverage → coverage.html
-make lint            # golangci-lint
-make ci-local        # deps + lint + test + build
-```
-
-Manual testing: import the Postman collection in [postman/](postman/) or use the cURL snippets above.
-
----
-
-## 📦 Deployment
-
-Production infrastructure is defined with **Terraform** in [terraform/](terraform/) — VPC across two
-AZs, an ALB, ECS Fargate tasks, RDS PostgreSQL, ElastiCache Redis, SQS/SNS, ECR, and Secrets Manager.
-Database migrations run as a one-shot ECS task from a dedicated `migrator` image.
-
-```bash
-make build           # static linux binary → bin/gateway
-make docker-build    # container image
-cd terraform && terraform init && terraform apply
-```
-
-See the [deployment topology diagram](docs/ARCHITECTURE.md#12-deployment-topology-aws) for the full picture.
-
----
-
-## 🗂️ Project Structure
-
-```
-nimbus/
-├── cmd/gateway/             # Composition root — wires everything together
-├── proto/notification/v1/   # gRPC contract (.proto + generated Go)
-├── internal/
-│   ├── api/                 # REST handlers + middleware (rate limit)
-│   ├── grpc/                # gRPC server + auth interceptors
-│   ├── worker/              # Poll loop + multi-channel senders (SES/SNS/webhook)
-│   ├── circuitbreaker/      # Per-channel circuit breaker FSM
-│   ├── db/                  # Repository pattern + models (Postgres)
-│   ├── redis/               # Idempotency + sliding-window rate limiter
-│   ├── sqs/                 # SQS producer/consumer
-│   ├── ai/                  # LLM compose + content enrichment
-│   ├── rag/                 # Embed · hybrid search · rerank · guard · pipeline
-│   ├── metrics/             # Prometheus instrumentation
-│   ├── observ/              # Structured logging (zap)
-│   └── config/              # Env-based configuration
-├── migrations/              # SQL migrations (incl. pgvector / knowledge_base)
-├── terraform/               # AWS infrastructure as code
-├── ai-integration/          # Python RAG eval (RAGAS) + agent tooling
-├── postman/                 # Postman collection for manual testing
-└── docs/                    # ARCHITECTURE.md · API.md · guides
-```
-
----
-
-## 📚 Documentation
-
-- **[Architecture Deep Dive](docs/ARCHITECTURE.md)** — C4 diagrams, sequence flows, state machines, scaling, failure modes, and design tradeoffs.
-- **[Engineering Internals](docs/INTERNALS.md)** — a code-level walkthrough of how every subsystem works (built from first principles), with the design tradeoffs spelled out.
-- **[API Reference](docs/API.md)** — every REST endpoint + the gRPC contract.
-- [AWS Setup](docs/AWS_SETUP.md) · [Multi-Channel](docs/MULTI_CHANNEL.md) · [Migrations](docs/migrations.md)
-- [AI Integration & RAGAS Eval](ai-integration/README.md)
-- [Postman Guide](postman/README.md)
-
----
-
-<div align="center">
-<sub>Built with Go · Designed for durability, observability, and horizontal scale.</sub>
-</div>
+| Start here | What to look for |
+|---|---|
+| [`cmd/gateway`](cmd/gateway/) | Dependency wiring, API routes, worker configuration, and optional integrations. |
+| [`internal/db`](internal/db/) | Durable work records, claims, stale recovery, and dead-letter transactions. |
+| [`internal/worker`](internal/worker/) | Shared dispatch logic, provider adapters, and SQS consumer behavior. |
+| [`internal/redis`](internal/redis/) | Request reservations, cached responses, and rate limiting. |
+| [Architecture](docs/ARCHITECTURE.md) · [Diagrams](ARCHITECTURE_DIAGRAMS.md) | Design decisions, state transitions, and failure handling. |
+| [Engineering internals](docs/INTERNALS.md) · [API reference](docs/API.md) | Implementation walkthrough and contracts. |
+| [Local demo](docs/LOCAL_DEMO.md) · [Postman guide](postman/README.md) | Reproduce and inspect notification workflows. |
+| [`terraform`](terraform/) · [Migration guide](docs/migrations.md) | AWS infrastructure definitions and schema changes. |

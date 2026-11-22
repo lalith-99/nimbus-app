@@ -47,10 +47,13 @@ func (m *MockRepository) MoveToDeadLetter(ctx context.Context, notif *db.Notific
 	if m.shouldFail {
 		return nil, errors.New("database error")
 	}
-	m.updateCalls = append(m.updateCalls, updateCall{notif.ID, db.StatusDeadLettered, notif.Attempt + 1, &lastError})
+	// Persistence stores the count supplied by the dispatcher; it does not
+	// increment it. Keep this mock faithful to Repository.MoveToDeadLetter.
+	m.updateCalls = append(m.updateCalls, updateCall{notif.ID, db.StatusDeadLettered, notif.Attempt, &lastError})
 	return &db.DeadLetterNotification{
 		ID:                     uuid.New(),
 		OriginalNotificationID: notif.ID,
+		Attempts:               notif.Attempt,
 		Status:                 db.DLQStatusPending,
 	}, nil
 }
@@ -155,11 +158,17 @@ func TestWorker_ProcessNotification_FailMaxRetries(t *testing.T) {
 
 	// After the 'processing' mark moved into ClaimPendingNotifications, the only
 	// update recorded here is the DLQ move (via MoveToDeadLetter) after max retries.
+	if sender.sendCalls != 1 {
+		t.Errorf("expected one final send attempt, got %d", sender.sendCalls)
+	}
+	if len(repo.updateCalls) != 1 {
+		t.Fatalf("expected one DLQ persistence call, got %d", len(repo.updateCalls))
+	}
 	if repo.updateCalls[0].status != db.StatusDeadLettered {
 		t.Errorf("expected status '%s' after max retries, got '%s'", db.StatusDeadLettered, repo.updateCalls[0].status)
 	}
 	if repo.updateCalls[0].attempt != 3 {
-		t.Errorf("expected attempt 3, got %d", repo.updateCalls[0].attempt)
+		t.Errorf("expected DLQ persistence to receive all 3 failed attempts, got %d", repo.updateCalls[0].attempt)
 	}
 }
 

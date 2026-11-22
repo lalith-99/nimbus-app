@@ -12,7 +12,8 @@ import (
 
 type Repository interface {
 	// ClaimPendingNotifications atomically claims a batch (FOR UPDATE SKIP LOCKED),
-	// marking them 'processing' so no other replica can pick the same rows.
+	// marking eligible rows 'processing' to coordinate active work. Stale claims
+	// may later be reclaimed; this does not prevent duplicate provider effects.
 	ClaimPendingNotifications(ctx context.Context, limit int) ([]*db.Notification, error)
 	UpdateNotificationStatus(ctx context.Context, id uuid.UUID, status string, attempt int, errorMsg *string, nextRetryAt *time.Time) error
 	MoveToDeadLetter(ctx context.Context, notif *db.Notification, lastError string) (*db.DeadLetterNotification, error)
@@ -79,9 +80,9 @@ func (w *Worker) Start(ctx context.Context) {
 }
 
 func (w *Worker) processBatch(ctx context.Context) {
-	// Atomically claim a batch. Each replica gets a disjoint set of rows
-	// (FOR UPDATE SKIP LOCKED), so we can scale workers horizontally without
-	// double-sending. The claim also reclaims rows stranded by crashed workers.
+	// Claim and mark eligible rows in one database statement. Row locks coordinate
+	// active claims; the timeout also makes stale processing rows reclaimable.
+	// A retry after an ambiguous send or failed status write can still resend.
 	notifications, err := w.repo.ClaimPendingNotifications(ctx, w.config.BatchSize)
 	if err != nil {
 		w.logger.Error("failed to claim pending notifications", zap.Error(err))
@@ -153,8 +154,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, notif *db.Notification) {
 		errMsg := err.Error()
 
 		if newAttempt >= d.maxRetries {
-			// Max retries reached, move to dead letter queue
-			_, dlqErr := d.repo.MoveToDeadLetter(ctx, notif, errMsg)
+			// Persist the final failed send in the DLQ attempt count, not just
+			// the attempts recorded before this dispatch began.
+			failedNotification := *notif
+			failedNotification.Attempt = newAttempt
+			_, dlqErr := d.repo.MoveToDeadLetter(ctx, &failedNotification, errMsg)
 			if dlqErr != nil {
 				d.logger.Error("failed to move notification to dead letter queue",
 					zap.String("id", notif.ID.String()),
